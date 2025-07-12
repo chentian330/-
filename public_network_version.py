@@ -629,34 +629,33 @@ def show_home_page():
             <p style="color: #86868B; font-size: 1.1rem;">请上传由销售积分系统生成的Excel文件</p>
         </div>
         """, unsafe_allow_html=True)
+    
+    uploaded_file = st.file_uploader(
+        "选择Excel文件",
+        type=["xlsx"],
+        help="请上传包含'员工积分数据'和'销售回款数据统计'工作表的Excel文件",
+        label_visibility="collapsed"
+    )
 
-        with col1:
-            # ... 其他代码 ...
-            uploaded_file = st.file_uploader(
-                "选择Excel文件",
-                type=["xlsx"],
-                help="请上传包含'员工积分数据'和'销售回款数据统计'工作表的Excel文件",
-                label_visibility="collapsed"
-            )
+    if uploaded_file is not None:
+        try:
+            # 将文件内容保存到session state中
+            st.session_state.uploaded_file = uploaded_file.getvalue()
 
-            if uploaded_file is not None:
-                try:
-                    # 将文件内容保存到session state中
-                    st.session_state.uploaded_file = uploaded_file.getvalue()
+            # 使用BytesIO加载文件
+            score_df, sales_df, error = load_excel_data(BytesIO(st.session_state.uploaded_file))
 
-                    # 使用BytesIO加载文件
-                    score_df, sales_df, error = load_excel_data(BytesIO(st.session_state.uploaded_file))
+            if error:
+                st.error(f"文件加载失败: {error}")
+            else:
+                st.session_state.score_df = score_df
+                st.session_state.sales_df = sales_df
+                st.session_state.data_loaded = True
+                st.session_state.file_name = uploaded_file.name
+                st.success(f"文件加载成功: {uploaded_file.name}")
+        except Exception as e:
+            st.error(f"文件处理出错: {str(e)}")
 
-                    if error:
-                        st.error(f"文件加载失败: {error}")
-                    else:
-                        st.session_state.score_df = score_df
-                        st.session_state.sales_df = sales_df
-                        st.session_state.data_loaded = True
-                        st.session_state.file_name = uploaded_file.name
-                        st.success(f"文件加载成功: {uploaded_file.name}")
-                except Exception as e:
-                    st.error(f"文件处理出错: {str(e)}")
 
     with col2:
         st.markdown("""
