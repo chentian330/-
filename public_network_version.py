@@ -502,7 +502,39 @@ def load_css():
 
         .fade-in {{
             animation: fadeIn 0.6s ease forwards;
+        }}   
+        
+        /* 文件上传器间距调整 */
+        .stFileUploader > div > div {{
+            margin-top: 20px !important;
+            margin-bottom: 10px !important;
+            transition: all 0.3s ease !important;
         }}
+        
+        .stFileUploader > div > div:hover {{
+            transform: translateY(-2px) !important;
+            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.08) !important;
+        }}
+        
+        /* 功能按钮容器 */
+        .menu-button-container {{
+            display: flex;
+            flex-direction: column;
+            gap: 8px; /* 按钮之间的间距 */
+            margin-top: 15px; /* 与上方卡片的间距 */
+        }}
+        
+        /* 按钮悬停效果增强 */
+        .stButton > button:hover {{
+            transform: scale(1.03) translateY(-2px) !important;
+            box-shadow: 0 10px 25px rgba(191, 90, 242, 0.3) !important;
+        }}
+        
+        /* 卡片与上传器之间的间距 */
+        .upload-area + .stFileUploader {{
+            margin-top: 25px !important;
+        }}
+            
     </style>
 
     <script>
@@ -623,49 +655,55 @@ def show_home_page():
     col1, col2 = st.columns([1, 2])
 
     with col1:
+        # 保持原始卡片结构不变
         st.markdown("""
         <div class="glass-card upload-area fade-in" style="animation-delay: 0.1s;">
             <h3 style="margin-bottom: 1.5rem; font-size: 1.8rem; color: #0A84FF;">📁 文件上传区域</h3>
             <p style="color: #86868B; font-size: 1.1rem;">请上传由销售积分系统生成的Excel文件</p>
         </div>
         """, unsafe_allow_html=True)
-    
-    uploaded_file = st.file_uploader(
-        "选择Excel文件",
-        type=["xlsx"],
-        help="请上传包含'员工积分数据'和'销售回款数据统计'工作表的Excel文件",
-        label_visibility="collapsed"
-    )
 
-    if uploaded_file is not None:
-        try:
-            # 将文件内容保存到session state中
-            st.session_state.uploaded_file = uploaded_file.getvalue()
+        # 文件上传器放在卡片外部，但在同一列内
+        uploaded_file = st.file_uploader(
+            "选择Excel文件",
+            type=["xlsx"],
+            help="请上传包含'员工积分数据'和'销售回款数据统计'工作表的Excel文件",
+            label_visibility="collapsed"
+        )
 
-            # 使用BytesIO加载文件
-            score_df, sales_df, error = load_excel_data(BytesIO(st.session_state.uploaded_file))
+        if uploaded_file is not None:
+            try:
+                # 将文件内容保存到session state中
+                st.session_state.uploaded_file = uploaded_file.getvalue()
 
-            if error:
-                st.error(f"文件加载失败: {error}")
-            else:
-                st.session_state.score_df = score_df
-                st.session_state.sales_df = sales_df
-                st.session_state.data_loaded = True
-                st.session_state.file_name = uploaded_file.name
-                st.success(f"文件加载成功: {uploaded_file.name}")
-        except Exception as e:
-            st.error(f"文件处理出错: {str(e)}")
+                # 使用BytesIO加载文件
+                score_df, sales_df, error = load_excel_data(BytesIO(st.session_state.uploaded_file))
 
+                if error:
+                    st.error(f"文件加载失败: {error}")
+                else:
+                    st.session_state.score_df = score_df
+                    st.session_state.sales_df = sales_df
+                    st.session_state.data_loaded = True
+                    st.session_state.file_name = uploaded_file.name
+                    st.success(f"文件加载成功: {uploaded_file.name}")
+            except Exception as e:
+                st.error(f"文件处理出错: {str(e)}")
 
     with col2:
+        # 保持右侧功能菜单卡片不变
         st.markdown("""
         <div class="glass-card fade-in" style="animation-delay: 0.2s;">
             <h3 style="text-align: center; color: #BF5AF2; margin-bottom: 2.5rem; font-size: 1.8rem;">📊 功能菜单</h3>
         </div>
         """, unsafe_allow_html=True)
 
+        # 为按钮添加容器
+        st.markdown('<div class="menu-button-container">', unsafe_allow_html=True)
+
         disabled = not st.session_state.data_loaded
 
+        # 功能按钮保持原样
         if st.button("🏆 查看红黑榜", key="btn_leaderboard", disabled=disabled, use_container_width=True):
             if st.session_state.data_loaded:
                 st.session_state.current_page = 'leaderboard'
@@ -690,6 +728,8 @@ def show_home_page():
                 st.rerun()
             else:
                 st.error("请添加文件后重试")
+
+        st.markdown('</div>', unsafe_allow_html=True)  # 关闭按钮容器
 
 
 # 红黑榜页面
