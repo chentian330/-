@@ -36,6 +36,8 @@ if 'score_df' not in st.session_state:
     st.session_state.score_df = None
 if 'sales_df' not in st.session_state:
     st.session_state.sales_df = None
+if 'department_sales_df' not in st.session_state:
+    st.session_state.department_sales_df = None
 if 'file_name' not in st.session_state:
     st.session_state.file_name = None
 
@@ -502,39 +504,7 @@ def load_css():
 
         .fade-in {{
             animation: fadeIn 0.6s ease forwards;
-        }}   
-        
-        /* 文件上传器间距调整 */
-        .stFileUploader > div > div {{
-            margin-top: 20px !important;
-            margin-bottom: 10px !important;
-            transition: all 0.3s ease !important;
         }}
-        
-        .stFileUploader > div > div:hover {{
-            transform: translateY(-2px) !important;
-            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.08) !important;
-        }}
-        
-        /* 功能按钮容器 */
-        .menu-button-container {{
-            display: flex;
-            flex-direction: column;
-            gap: 8px; /* 按钮之间的间距 */
-            margin-top: 15px; /* 与上方卡片的间距 */
-        }}
-        
-        /* 按钮悬停效果增强 */
-        .stButton > button:hover {{
-            transform: scale(1.03) translateY(-2px) !important;
-            box-shadow: 0 10px 25px rgba(191, 90, 242, 0.3) !important;
-        }}
-        
-        /* 卡片与上传器之间的间距 */
-        .upload-area + .stFileUploader {{
-            margin-top: 25px !important;
-        }}
-            
     </style>
 
     <script>
@@ -574,10 +544,12 @@ def auto_detect_excel_file():
 # 加载Excel数据
 def load_excel_data(file_path):
     try:
+        # Load score_df (required)
         score_df = pd.read_excel(file_path, sheet_name='员工积分数据', engine='openpyxl')
         if '队名' not in score_df.columns:
-            return None, None, "数据文件中缺少'队名'列"
+            return None, None, None, "数据文件中缺少'队名'列"
 
+        # Load sales_df (optional)
         sales_df = None
         try:
             sales_df = pd.read_excel(file_path, sheet_name='销售回款数据统计', engine='openpyxl')
@@ -587,9 +559,16 @@ def load_excel_data(file_path):
             except:
                 pass
 
-        return score_df, sales_df, None
+        # Load department_sales_df (optional)
+        department_sales_df = None
+        try:
+            department_sales_df = pd.read_excel(file_path, sheet_name='部门销售回款统计', engine='openpyxl')
+        except:
+            pass
+
+        return score_df, sales_df, department_sales_df, None
     except Exception as e:
-        return None, None, f"读取文件时出错: {str(e)}"
+        return None, None, None, f"读取文件时出错: {str(e)}"
 
 
 # 导航栏
@@ -655,7 +634,6 @@ def show_home_page():
     col1, col2 = st.columns([1, 2])
 
     with col1:
-        # 保持原始卡片结构不变
         st.markdown("""
         <div class="glass-card upload-area fade-in" style="animation-delay: 0.1s;">
             <h3 style="margin-bottom: 1.5rem; font-size: 1.8rem; color: #0A84FF;">📁 文件上传区域</h3>
@@ -663,7 +641,6 @@ def show_home_page():
         </div>
         """, unsafe_allow_html=True)
 
-        # 文件上传器放在卡片外部，但在同一列内
         uploaded_file = st.file_uploader(
             "选择Excel文件",
             type=["xlsx"],
@@ -672,38 +649,26 @@ def show_home_page():
         )
 
         if uploaded_file is not None:
-            try:
-                # 将文件内容保存到session state中
-                st.session_state.uploaded_file = uploaded_file.getvalue()
-
-                # 使用BytesIO加载文件
-                score_df, sales_df, error = load_excel_data(BytesIO(st.session_state.uploaded_file))
-
-                if error:
-                    st.error(f"文件加载失败: {error}")
-                else:
-                    st.session_state.score_df = score_df
-                    st.session_state.sales_df = sales_df
-                    st.session_state.data_loaded = True
-                    st.session_state.file_name = uploaded_file.name
-                    st.success(f"文件加载成功: {uploaded_file.name}")
-            except Exception as e:
-                st.error(f"文件处理出错: {str(e)}")
+            score_df, sales_df, department_sales_df, error = load_excel_data(uploaded_file)
+            if error:
+                st.error(f"文件加载失败: {error}")
+            else:
+                st.session_state.score_df = score_df
+                st.session_state.sales_df = sales_df
+                st.session_state.department_sales_df = department_sales_df
+                st.session_state.data_loaded = True
+                st.session_state.file_name = uploaded_file.name
+                st.success(f"文件加载成功: {uploaded_file.name}")
 
     with col2:
-        # 保持右侧功能菜单卡片不变
         st.markdown("""
         <div class="glass-card fade-in" style="animation-delay: 0.2s;">
             <h3 style="text-align: center; color: #BF5AF2; margin-bottom: 2.5rem; font-size: 1.8rem;">📊 功能菜单</h3>
         </div>
         """, unsafe_allow_html=True)
 
-        # 为按钮添加容器
-        st.markdown('<div class="menu-button-container">', unsafe_allow_html=True)
-
         disabled = not st.session_state.data_loaded
 
-        # 功能按钮保持原样
         if st.button("🏆 查看红黑榜", key="btn_leaderboard", disabled=disabled, use_container_width=True):
             if st.session_state.data_loaded:
                 st.session_state.current_page = 'leaderboard'
@@ -729,7 +694,16 @@ def show_home_page():
             else:
                 st.error("请添加文件后重试")
 
-        st.markdown('</div>', unsafe_allow_html=True)  # 关闭按钮容器
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        dept_data_loaded = st.session_state.department_sales_df is not None
+        if st.button("🏢 查看部门销售回款明细", key="btn_dept_sales", disabled=not dept_data_loaded,
+                     use_container_width=True):
+            if dept_data_loaded:
+                st.session_state.current_page = 'department_sales'
+                st.rerun()
+            else:
+                st.error("请上传包含'部门销售回款统计'工作表的文件。")
 
 
 # 红黑榜页面
@@ -765,6 +739,171 @@ def show_sales_page():
 
     display_achievement_badges(st.session_state.score_df, st.session_state.sales_df)
     display_sales_employee_details(st.session_state.score_df, st.session_state.sales_df)
+
+
+# 部门销售回款明细页面
+def show_department_sales_page():
+    if st.session_state.department_sales_df is None:
+        st.error("部门销售回款数据未加载。请上传有效文件。")
+        st.session_state.current_page = 'home'
+        return
+
+    st.markdown('<h1 style="text-align: center; font-family: \'SF Pro Display\', sans-serif;">部门销售回款分析</h1>',
+                unsafe_allow_html=True)
+
+    # --- Data Preparation ---
+    df = st.session_state.department_sales_df.copy()
+
+    # Remove the '合计' (Total) row for rankings and charts
+    df = df[df['部门'] != '合计'].copy()
+    if df.empty:
+        st.warning("数据文件中没有有效的部门数据。")
+        return
+
+    # --- CORRECTED COLUMN NAMES ---
+    # Using full-width Chinese parentheses as specified
+    payment_col_normal = '本月回款额（不包含超期账款回款额）'
+    payment_col_overdue = '本月回款额（超期账款回款额）'
+
+    if payment_col_normal in df.columns and payment_col_overdue in df.columns:
+        df['月总回款额'] = df[payment_col_normal].fillna(0) + df[payment_col_overdue].fillna(0)
+    else:
+        st.error(f"月度回款列缺失，请检查文件中的列名是否为 '{payment_col_normal}' 和 '{payment_col_overdue}'。")
+        return
+
+    # Calculate total weekly payments using corrected full-width parentheses
+    for i in range(1, 6):
+        week_payment_normal = f'第{i}周回款额（不包含超期账款回款额）'
+        week_payment_overdue = f'第{i}周回款额（超期账款回款额）'
+        if week_payment_normal in df.columns and week_payment_overdue in df.columns:
+            df[f'第{i}周总回款额'] = df[week_payment_normal].fillna(0) + df[week_payment_overdue].fillna(0)
+
+    # --- 1 & 2. Rankings ---
+    st.markdown('<h3 class="section-title fade-in">月度排名</h3>', unsafe_allow_html=True)
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("#### 销售额排名 (部门)")
+        sales_ranking_df = df.sort_values('本月销售额', ascending=False)
+        fig_sales = px.bar(sales_ranking_df, x='本月销售额', y='部门', orientation='h', title='月销售额排名',
+                           labels={'本月销售额': '销售额 (元)', '部门': '部门'}, text='本月销售额',
+                           color_discrete_sequence=['#0A84FF'])
+        fig_sales.update_traces(texttemplate='%{text:,.0f}', textposition='outside')
+        fig_sales.update_layout(yaxis={'categoryorder': 'total ascending'}, plot_bgcolor='rgba(0,0,0,0)',
+                                paper_bgcolor='rgba(0,0,0,0)', font=dict(color='#1D1D1F'))
+        st.plotly_chart(fig_sales, use_container_width=True)
+
+    with col2:
+        st.markdown("#### 回款额排名 (部门)")
+        payment_ranking_df = df.sort_values('月总回款额', ascending=False)
+        fig_payment = px.bar(payment_ranking_df, x='月总回款额', y='部门', orientation='h', title='月回款额排名',
+                             labels={'月总回款额': '回款额 (元)', '部门': '部门'}, text='月总回款额',
+                             color_discrete_sequence=['#BF5AF2'])
+        fig_payment.update_traces(texttemplate='%{text:,.0f}', textposition='outside')
+        fig_payment.update_layout(yaxis={'categoryorder': 'total ascending'}, plot_bgcolor='rgba(0,0,0,0)',
+                                  paper_bgcolor='rgba(0,0,0,0)', font=dict(color='#1D1D1F'))
+        st.plotly_chart(fig_payment, use_container_width=True)
+
+    # --- 3 & 4. Weekly Trends ---
+    st.markdown('<h3 class="section-title fade-in">各周走势</h3>', unsafe_allow_html=True)
+
+    # Prepare data for line charts
+    sales_cols = ['部门'] + [f'第{i}周销售额' for i in range(1, 6) if f'第{i}周销售额' in df.columns]
+    payment_cols = ['部门'] + [f'第{i}周总回款额' for i in range(1, 6) if f'第{i}周总回款额' in df.columns]
+
+    sales_melted = df[sales_cols].melt(id_vars='部门', var_name='周次', value_name='销售额').dropna()
+    payment_melted = df[payment_cols].melt(id_vars='部门', var_name='周次', value_name='回款额').dropna()
+
+    # Correctly extract week number for sorting
+    sales_melted['周序号'] = sales_melted['周次'].str.extract(r'(\d+)').astype(int)
+    payment_melted['周序号'] = payment_melted['周次'].str.replace('第', '').str.replace('周总回款额', '').astype(int)
+
+    col3, col4 = st.columns(2)
+    with col3:
+        st.markdown("#### 各周销售额走势")
+        if not sales_melted.empty:
+            fig_sales_trend = px.line(sales_melted.sort_values('周序号'), x='周次', y='销售额', color='部门',
+                                      title='各部门周销售额趋势', markers=True)
+            fig_sales_trend.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+                                          font=dict(color='#1D1D1F'), xaxis_title=None)
+            st.plotly_chart(fig_sales_trend, use_container_width=True)
+        else:
+            st.info("无周销售额数据可供展示。")
+
+    with col4:
+        st.markdown("#### 各周回款额走势")
+        if not payment_melted.empty:
+            # Use custom sorting for the x-axis labels
+            custom_x_labels = sorted(payment_melted['周次'].unique(),
+                                     key=lambda x: int(x.replace('第', '').replace('周总回款额', '')))
+            fig_payment_trend = px.line(payment_melted, x='周次', y='回款额', color='部门', title='各部门周回款额趋势',
+                                        markers=True, category_orders={"周次": custom_x_labels})
+            fig_payment_trend.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+                                            font=dict(color='#1D1D1F'), xaxis_title=None)
+            fig_payment_trend.update_xaxes(
+                ticktext=[f"第 {x.replace('第', '').replace('周总回款额', '')} 周" for x in custom_x_labels],
+                tickvals=custom_x_labels)
+            st.plotly_chart(fig_payment_trend, use_container_width=True)
+        else:
+            st.info("无周回款额数据可供展示。")
+
+    # --- 5. Department Details ---
+    st.markdown('<h3 class="section-title fade-in">部门销售回款详情</h3>', unsafe_allow_html=True)
+
+    departments = df['部门'].unique()
+    selected_dept = st.selectbox("选择要查看的部门", departments, label_visibility="collapsed")
+
+    if selected_dept:
+        dept_data = df[df['部门'] == selected_dept].iloc[0]
+
+        st.markdown(f"""
+        <div class="glass-card fade-in">
+            <h2 style="text-align:center; color: #BF5AF2; font-family: 'SF Pro Display';">{escape(selected_dept)} - 月度总览</h2>
+            <div class="divider"></div> """, unsafe_allow_html=True)
+
+        kpi_cols = st.columns(3)
+        with kpi_cols[0]:
+            st.metric("本月销售额", f"¥ {dept_data.get('本月销售额', 0):,.2f}")
+        with kpi_cols[1]:
+            st.metric("本月总回款额", f"¥ {dept_data.get('月总回款额', 0):,.2f}")
+        with kpi_cols[2]:
+            overdue_val = dept_data.get(payment_col_overdue, 0)
+            total_payment = dept_data.get('月总回款额', 0)
+            overdue_payment_pct = (overdue_val / total_payment * 100) if total_payment > 0 else 0
+            st.metric("超期回款占比", f"{overdue_payment_pct:.2f}%", help=f"超期回款额: ¥ {overdue_val:,.2f}")
+
+        st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+        st.markdown('<h4 style="margin-top:20px; font-family: \'SF Pro Display\', sans-serif;">周度数据详情</h4>',
+                    unsafe_allow_html=True)
+
+        detail_cols = st.columns(2)
+        with detail_cols[0]:
+            st.markdown("##### 周销售额")
+            weekly_sales_data = []
+            for i in range(1, 6):
+                col_name = f'第{i}周销售额'
+                if col_name in dept_data and pd.notna(dept_data[col_name]):
+                    weekly_sales_data.append({'周次': f'第 {i} 周', '销售额': dept_data[col_name]})
+            if weekly_sales_data:
+                st.dataframe(pd.DataFrame(weekly_sales_data).style.format({'销售额': '¥ {:,.2f}'}),
+                             use_container_width=True, hide_index=True)
+            else:
+                st.info("无周销售数据")
+
+        with detail_cols[1]:
+            st.markdown("##### 周回款额")
+            weekly_payment_data = []
+            for i in range(1, 6):
+                col_name = f'第{i}周总回款额'
+                if col_name in dept_data and pd.notna(dept_data[col_name]):
+                    weekly_payment_data.append({'周次': f'第 {i} 周', '回款额': dept_data[col_name]})
+            if weekly_payment_data:
+                st.dataframe(pd.DataFrame(weekly_payment_data).style.format({'回款额': '¥ {:,.2f}'}),
+                             use_container_width=True, hide_index=True)
+            else:
+                st.info("无周回款数据")
+
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
 # 获取小组数据
@@ -1897,6 +2036,7 @@ def display_weekly_analysis(sales_df):
                 st.dataframe(week_payment_df, use_container_width=True, hide_index=True)
 
 
+# 主应用
 def main():
     st.set_page_config(
         page_title="销售积分红黑榜系统",
@@ -1907,34 +2047,18 @@ def main():
 
     load_css()
 
-    # 检查session state中是否有已上传的文件内容
-    if st.session_state.get('uploaded_file') and not st.session_state.data_loaded:
-        try:
-            # 使用BytesIO加载已保存的文件内容
-            score_df, sales_df, error = load_excel_data(BytesIO(st.session_state.uploaded_file))
+    if not st.session_state.data_loaded and st.session_state.file_name is None:
+        detected_file = auto_detect_excel_file()
+        if detected_file:
+            score_df, sales_df, department_sales_df, error = load_excel_data(detected_file)
             if not error:
                 st.session_state.score_df = score_df
                 st.session_state.sales_df = sales_df
+                st.session_state.department_sales_df = department_sales_df
                 st.session_state.data_loaded = True
-        except Exception as e:
-            st.error(f"重新加载文件时出错: {str(e)}")
-
-    # 只在本地环境启用文件自动检测
-    if not st.session_state.data_loaded and st.session_state.file_name is None:
-        if not st.runtime.exists():  # 检查是否在Streamlit Sharing环境
-            detected_file = auto_detect_excel_file()
-            if detected_file:
-                try:
-                    score_df, sales_df, error = load_excel_data(detected_file)
-                    if not error:
-                        st.session_state.score_df = score_df
-                        st.session_state.sales_df = sales_df
-                        st.session_state.data_loaded = True
-                        st.session_state.file_name = detected_file
-                    else:
-                        st.error(f"自动加载文件失败: {error}")
-                except Exception as e:
-                    st.error(f"文件加载错误: {str(e)}")
+                st.session_state.file_name = detected_file
+            else:
+                st.error(f"自动加载文件失败: {error}")
 
     if st.session_state.current_page != 'home':
         show_navigation()
@@ -1947,6 +2071,8 @@ def main():
         show_scores_page()
     elif st.session_state.current_page == 'sales':
         show_sales_page()
+    elif st.session_state.current_page == 'department_sales':
+        show_department_sales_page()
 
     st.markdown("---")
     st.markdown("""
