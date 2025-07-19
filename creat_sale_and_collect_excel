@@ -1,0 +1,1367 @@
+import pandas as pd
+import numpy as np
+from datetime import datetime
+import os
+import warnings
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.utils import get_column_letter
+import re
+import openpyxl  # 确保已导入openpyxl
+import calendar
+
+# 忽略openpyxl的样式警告
+warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
+
+# 列名常量定义 - 如果Excel文件的列名发生变化，只需修改这里
+# 每日销售回款额.xlsx的列名
+NAME_COL = "姓名"
+DATE_COL = "日期"
+SALES_COL = "今日销售额"
+NORMAL_PAYMENT_COL = "今日回款额（不包含超期账款）"
+OVERDUE_PAYMENT_COL = "超期账款回款额"
+OVERDUE_COL = "超期账款（未追回）"
+DEPARTMENT_COL = "所在部门"
+
+# 上月销售回款额.xlsx的列名
+LAST_MONTH_SALES_COL = "上月销售额"
+LAST_MONTH_PAYMENT_COL = "上月回款额"
+
+# 更新后的队名映射
+TEAM_NAME_MAPPING = {
+    1: "飞跃队",
+    2: "一心队",
+    3: "狂飙队",
+    4: "杰出战狼队",
+    5: "超越队",
+    6: "争锋队",
+    99: "未分组"  # 添加未分组的映射
+}
+
+# 必要的每日数据和上月数据的列名 - 使用常量
+REQUIRED_DAILY_COLS = [NAME_COL, DATE_COL, SALES_COL, NORMAL_PAYMENT_COL, OVERDUE_COL, OVERDUE_PAYMENT_COL]
+REQUIRED_MONTHLY_COLS = [NAME_COL, LAST_MONTH_SALES_COL, LAST_MONTH_PAYMENT_COL]
+
+
+def check_required_columns(df, required_cols, file_desc):
+    """检查DataFrame是否包含所有必需的列，如果缺失则报错"""
+    missing = [col for col in required_cols if col not in df.columns]
+    if missing:
+        raise ValueError(f"{file_desc} 缺少必要列: {missing}")
+
+
+def convert_amount(value):
+    """将包含'万'的金额字符串转换为浮点数，支持常规数字和带单位的金额"""
+    if pd.isna(value) or value == '':
+        return 0.0
+    if isinstance(value, str):
+        value = value.replace(',', '').replace(' ', '')
+        if '万' in value:
+            try:
+                num = float(re.sub(r'[^\d.]', '', value))
+                return num * 10000
+            except:
+                return 0.0
+        else:
+            try:
+                return float(value)
+            except:
+                return 0.0
+    return float(value)
+
+
+def clean_name(name):
+    """清洗员工姓名，去除HTML标签、换行符和多余空格"""
+    if pd.isna(name):
+        return "未知"
+    name_str = str(name)
+    name_str = name_str.replace('<br>', '').replace('\n', '').strip()
+    return ' '.join(name_str.split())
+
+
+def find_daily_max_values(worksheet):
+    """找到每日销售回款数据表中每日销售额和回款额的最高值单元格"""
+    max_cells = set()
+
+    # 获取表头行，找到日期列
+    header_row = worksheet[1]
+    date_columns = {}  # {day: {'sales_col': col_idx, 'payment_col': col_idx}}
+
+    for cell in header_row:
+        if cell.value and isinstance(cell.value, str):
+            # 匹配格式如 "1号\n星期二\n销售额" 或 "1号\n星期二\n回款额"
+            if '\n' in cell.value:
+                parts = cell.value.split('\n')
+                if len(parts) >= 3:
+                    day_part = parts[0]  # "1号"
+                    type_part = parts[2]  # "销售额" 或 "回款额"
+
+                    if day_part.endswith('号') and day_part[:-1].isdigit():
+                        day = int(day_part[:-1])
+
+                        if day not in date_columns:
+                            date_columns[day] = {}
+
+                        if type_part == '销售额':
+                            date_columns[day]['sales_col'] = cell.column
+                        elif type_part == '回款额':
+                            date_columns[day]['payment_col'] = cell.column
+
+    # 对每一天找到销售额和回款额的最高值
+    for day, cols in date_columns.items():
+        if 'sales_col' in cols and 'payment_col' in cols:
+            sales_col = cols['sales_col']
+            payment_col = cols['payment_col']
+
+            # 收集该列的所有数值（跳过表头和合计行）
+            sales_values = []
+            payment_values = []
+
+            for row_idx in range(2, worksheet.max_row + 1):
+                # 检查是否是合计行（第一列值为'合计'）
+                first_cell = worksheet.cell(row=row_idx, column=1)
+                if first_cell.value == '合计':
+                    continue  # 跳过合计行
+
+                sales_cell = worksheet.cell(row=row_idx, column=sales_col)
+                payment_cell = worksheet.cell(row=row_idx, column=payment_col)
+
+                if sales_cell.value is not None and isinstance(sales_cell.value, (int, float)):
+                    sales_values.append((sales_cell.value, row_idx, sales_col))
+
+                if payment_cell.value is not None and isinstance(payment_cell.value, (int, float)):
+                    payment_values.append((payment_cell.value, row_idx, payment_col))
+
+            # 找到最高值（只有当最高值大于0时才高亮）
+            if sales_values:
+                max_sales = max(sales_values, key=lambda x: x[0])
+                if max_sales[0] > 0:  # 只有当最高值大于0时才高亮
+                    max_cells.add((max_sales[1], max_sales[2]))  # (row, col)
+
+            if payment_values:
+                max_payment = max(payment_values, key=lambda x: x[0])
+                if max_payment[0] > 0:  # 只有当最高值大于0时才高亮
+                    max_cells.add((max_payment[1], max_payment[2]))  # (row, col)
+
+    return max_cells
+
+
+def apply_excel_styles(writer, sheet_name, is_score_sheet=False, is_daily_sheet=False):
+    """美化Excel输出的样式，包括表头、列宽、边框、冻结窗格等"""
+    workbook = writer.book
+    worksheet = workbook[sheet_name]
+
+    # 设置所有列宽为10.2
+    for col_idx in range(1, worksheet.max_column + 1):
+        col_letter = get_column_letter(col_idx)
+        # 确保列维度对象存在
+        if col_letter not in worksheet.column_dimensions:
+            worksheet.column_dimensions[col_letter] = openpyxl.worksheet.dimensions.ColumnDimension(worksheet,
+                                                                                                    col_letter)
+        worksheet.column_dimensions[col_letter].width = 10.2
+
+    # 表头样式 - 深蓝色
+    header_font = Font(bold=True, color='FFFFFF', size=12)
+    header_fill = PatternFill(start_color='1F4E79', end_color='1F4E79', fill_type='solid')  # 深蓝色
+    header_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+
+    # 特殊列填充样式 - 浅蓝色
+    light_blue_fill = PatternFill(start_color='DCE6F1', end_color='DCE6F1', fill_type='solid')
+
+    # 新增：销售业绩完成进度颜色填充
+    light_green_fill = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid')  # 浅绿色
+    light_yellow_fill = PatternFill(start_color='FFEB9C', end_color='FFEB9C', fill_type='solid')  # 浅黄色
+    light_red_fill = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')  # 浅红色
+
+    # 数据样式 - 使用普通字体
+    data_font = Font(size=11)
+    data_alignment = Alignment(horizontal='right', vertical='center')
+    data_border = Border(left=Side(style='thin'),
+                         right=Side(style='thin'),
+                         top=Side(style='thin'),
+                         bottom=Side(style='thin'))
+
+    # 如果是每日销售回款数据表，需要高亮每日最高值
+    daily_max_cells = set()
+    if is_daily_sheet:
+        daily_max_cells = find_daily_max_values(worksheet)
+
+    # 应用表头样式
+    for cell in worksheet[1]:
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_alignment
+        cell.border = data_border
+
+    # 获取列名到列索引的映射
+    header_row = worksheet[1]
+    col_name_to_index = {}
+    for cell in header_row:
+        if cell.value:
+            col_name_to_index[str(cell.value)] = cell.column
+
+    # 部门销售回款统计表特殊处理
+    if sheet_name == '部门销售回款统计':
+        # 只冻结第一列
+        worksheet.freeze_panes = 'B2'
+        # 需要浅蓝色填充的列
+        dept_light_blue_columns = [
+            '本月销售额',
+            '本月回未超期款',
+            '本月回超期款',
+            '本月回款合计',
+            '月末逾期未收回额'
+        ]
+        dept_light_blue_col_indices = []
+        for col_name in dept_light_blue_columns:
+            if col_name in col_name_to_index:
+                dept_light_blue_col_indices.append(col_name_to_index[col_name])
+        # 应用数据样式
+        for row in worksheet.iter_rows(min_row=2, max_row=worksheet.max_row, min_col=1, max_col=worksheet.max_column):
+            for cell in row:
+                cell.font = data_font
+                cell.border = data_border
+                # 第一列居中
+                if cell.column == 1:
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
+                else:
+                    cell.alignment = data_alignment
+                # 浅蓝色填充需要的列
+                if cell.column in dept_light_blue_col_indices:
+                    cell.fill = light_blue_fill
+        # 自动筛选
+        worksheet.auto_filter.ref = worksheet.dimensions
+        return
+
+    # 其它sheet原有逻辑
+    # 定义需要浅蓝色填充的列名
+    if is_score_sheet:
+        # 员工积分数据表：个人总积分、小组总积分和加权小组总分用浅蓝色填充
+        light_blue_columns = ['个人总积分', '小组总积分', '加权小组总分']
+    elif is_daily_sheet:
+        # 每日销售回款数据表：不需要特殊填充
+        light_blue_columns = []
+    else:
+        # 销售回款数据表：上月和本月相关列用浅蓝色填充
+        light_blue_columns = [
+            '上月销售额', '上月回款额', '本月销售额', '本月销售任务', '本月回未超期款',
+            '本月回超期款', '本月回款合计', '本月回款任务', '月末逾期未收回额'
+        ]
+
+    # 获取需要浅蓝色填充的列索引
+    light_blue_col_indices = []
+    for col_name in light_blue_columns:
+        if col_name in col_name_to_index:
+            light_blue_col_indices.append(col_name_to_index[col_name])
+
+    # 获取销售业绩完成进度列索引
+    progress_col_idx = -1
+    if '销售业绩完成进度' in col_name_to_index:
+        progress_col_idx = col_name_to_index['销售业绩完成进度']
+
+    # 获取回款业绩完成进度列索引
+    payment_progress_col_idx = -1
+    if '回款业绩完成进度' in col_name_to_index:
+        payment_progress_col_idx = col_name_to_index['回款业绩完成进度']
+
+    # 应用数据样式
+    for row in worksheet.iter_rows(min_row=2, max_row=worksheet.max_row, min_col=1, max_col=worksheet.max_column):
+        for cell in row:
+            cell.font = data_font
+            cell.border = data_border
+
+            # 设置对齐方式
+            if cell.column in [1, 2, 3]:  # 月份、队名和员工姓名列居中
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+            else:
+                cell.alignment = data_alignment
+
+            # 设置特殊列的浅蓝色填充
+            if cell.column in light_blue_col_indices:
+                cell.fill = light_blue_fill
+
+            # 销售回款数据统计表：根据销售业绩完成进度填充不同颜色
+            elif sheet_name == '销售回款数据统计' and cell.column == progress_col_idx and cell.row > 1:
+                if isinstance(cell.value, (int, float)):
+                    progress_value = cell.value
+                    # 设置单元格显示格式为百分比（Excel中使用）
+                    cell.number_format = '0.00%'
+                    # 根据业绩进度设置背景色
+                    if progress_value >= 1.0:  # ≥100%
+                        cell.fill = light_green_fill
+                    elif 0.66 <= progress_value < 1.0:  # 66%-99%
+                        cell.fill = light_yellow_fill
+                    else:  # <66%
+                        cell.fill = light_red_fill
+
+            # 销售回款数据统计表：根据回款业绩完成进度填充不同颜色
+            elif sheet_name == '销售回款数据统计' and cell.column == payment_progress_col_idx and cell.row > 1:
+                if isinstance(cell.value, (int, float)):
+                    progress_value = cell.value
+                    # 设置单元格显示格式为百分比（Excel中使用）
+                    cell.number_format = '0.00%'
+                    # 根据业绩进度设置背景色
+                    if progress_value >= 1.0:  # ≥100%
+                        cell.fill = light_green_fill
+                    elif 0.66 <= progress_value < 1.0:  # 66%-99%
+                        cell.fill = light_yellow_fill
+                    else:  # <66%
+                        cell.fill = light_red_fill
+
+            # 每日销售回款数据表：高亮每日最高值
+            elif is_daily_sheet and (cell.row, cell.column) in daily_max_cells:
+                cell.fill = light_blue_fill
+
+    # 冻结窗格 - 冻结统计月份到员工姓名三列
+    worksheet.freeze_panes = 'D2'
+
+    # 自动筛选
+    worksheet.auto_filter.ref = worksheet.dimensions
+
+    # 暂时不合并单元格，避免数据读取问题
+    # merge_team_cells(worksheet)
+
+
+def merge_team_cells(worksheet):
+    """合并相同队名的单元格"""
+    current_team = None
+    start_row = 2
+    end_row = 2
+
+    for row_idx in range(2, worksheet.max_row + 1):
+        team_cell = worksheet.cell(row=row_idx, column=2)
+        team_value = team_cell.value
+
+        if team_value != current_team:
+            if current_team is not None and start_row < end_row:
+                # 合并前一组的单元格
+                worksheet.merge_cells(f'B{start_row}:B{end_row}')
+                # 居中显示合并后的单元格
+                merged_cell = worksheet.cell(row=start_row, column=2)
+                merged_cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+
+            # 开始新的组
+            current_team = team_value
+            start_row = row_idx
+            end_row = row_idx
+        else:
+            end_row = row_idx
+
+    # 合并最后一组的单元格
+    if current_team is not None and start_row < end_row:
+        worksheet.merge_cells(f'B{start_row}:B{end_row}')
+        merged_cell = worksheet.cell(row=start_row, column=2)
+        merged_cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+
+
+def calculate_scores(df):
+    """根据积分规则计算每位员工的积分"""
+    # 1. 本月目标达成分数
+    df['销售额目标分'] = (df['本月销售额'] / 450000) * 40
+    df['回款额目标分'] = (df['本月回未超期款'] / 380000) * 25
+    # 2. 超期账款追回分
+    total_overdue = df['月末逾期未收回额'] + df['本月回超期款']
+    df['超期欠款比例'] = df['月末逾期未收回额'] / (total_overdue + 1e-9)  # 加一个小数避免除零
+    df['超期账款追回分'] = 10 - (df['超期欠款比例'] * 20)
+    # 3. 销售排名分
+    df['销售排名'] = df['本月销售额'].rank(method='min', ascending=False)
+    df['销售排名分'] = 5 - (df['销售排名'] - 1) * 0.5
+    df['销售排名分'] = df['销售排名分'].clip(lower=0)
+    # 4. 回款排名分
+    df['回款排名'] = df['本月回款合计'].rank(method='min', ascending=False)
+    df['回款排名分'] = 5 - (df['回款排名'] - 1) * 0.5
+    df['回款排名分'] = df['回款排名分'].clip(lower=0)
+    # 5. 进步分
+    df['销售进步率'] = (df['本月销售额'] - df[LAST_MONTH_SALES_COL]) / (df[LAST_MONTH_SALES_COL] + 1e-9)
+    df['销售进步分'] = 0.0
+    df['销售进步区间'] = 0
+    # 进步区间划分
+    df.loc[(df['本月销售额'] > 450000) & (df['销售进步率'] > 0.1), '销售进步区间'] = 1
+    df.loc[(df['本月销售额'] >= 400000) & (df['本月销售额'] <= 450000) & (df['销售进步率'] > 0.25), '销售进步区间'] = 2
+    df.loc[(df['本月销售额'] >= 300000) & (df['本月销售额'] < 400000) & (df['销售进步率'] > 0.4), '销售进步区间'] = 3
+    df['回款进步率'] = (df['本月回款合计'] - df[LAST_MONTH_PAYMENT_COL]) / (df[LAST_MONTH_PAYMENT_COL] + 1e-9)
+    df['回款进步分'] = 0.0
+    df['回款进步区间'] = 0
+    df.loc[(df['本月回款合计'] > 450000) & (df['回款进步率'] > 0.1), '回款进步区间'] = 1
+    df.loc[
+        (df['本月回款合计'] >= 400000) & (df['本月回款合计'] <= 450000) & (df['回款进步率'] > 0.25), '回款进步区间'] = 2
+    df.loc[
+        (df['本月回款合计'] >= 300000) & (df['本月回款合计'] < 400000) & (df['回款进步率'] > 0.4), '回款进步区间'] = 3
+    # 6. 小组加分
+    # 使用组别编号而不是队名进行分组计算
+    df['组内销售达标'] = df.groupby('组别')['本月销售额'].transform(lambda x: all(x >= 380000))
+    df['组内回款达标'] = df.groupby('组别')['本月回款合计'].transform(lambda x: all(x >= 290000))
+    df['小组加分'] = 0
+    df.loc[df['组内销售达标'], '小组加分'] += 5
+    df.loc[df['组内回款达标'], '小组加分'] += 5
+    # 7. 进步分排名分配
+    for interval in [1, 2, 3]:
+        sales_mask = df['销售进步区间'] == interval
+        if sales_mask.any():
+            sales_subset = df[sales_mask].copy()
+            sales_subset['销售进步排名'] = sales_subset['销售进步率'].rank(method='min', ascending=False)
+            if interval == 1:
+                sales_subset['销售进步分'] = sales_subset['销售进步排名'].apply(
+                    lambda x: [6.0, 5.0, 4.0, 3.5, 3.0, 2.0, 1.0][min(int(x) - 1, 6)])
+            elif interval == 2:
+                sales_subset['销售进步分'] = sales_subset['销售进步排名'].apply(
+                    lambda x: [4.0, 3.5, 3.0][min(int(x) - 1, 2)])
+            else:
+                sales_subset['销售进步分'] = sales_subset['销售进步排名'].apply(
+                    lambda x: [3.0, 2.0, 1.0][min(int(x) - 1, 2)])
+            df.loc[sales_mask, '销售进步分'] = sales_subset['销售进步分'].values
+        repayment_mask = df['回款进步区间'] == interval
+        if repayment_mask.any():
+            repayment_subset = df[repayment_mask].copy()
+            repayment_subset['回款进步排名'] = repayment_subset['回款进步率'].rank(method='min', ascending=False)
+            if interval == 1:
+                repayment_subset['回款进步分'] = repayment_subset['回款进步排名'].apply(
+                    lambda x: [5.0, 4.5, 4.0][min(int(x) - 1, 2)])
+            elif interval == 2:
+                repayment_subset['回款进步分'] = repayment_subset['回款进步排名'].apply(
+                    lambda x: [4.0, 3.0, 2.0][min(int(x) - 1, 2)])
+            else:
+                repayment_subset['回款进步分'] = repayment_subset['回款进步排名'].apply(
+                    lambda x: [2.0, 1.5, 1.0][min(int(x) - 1, 2)])
+            df.loc[repayment_mask, '回款进步分'] = repayment_subset['回款进步分'].values
+    # 8. 基础分
+    df['基础分'] = 10.0
+    # 9. 个人总积分（添加基础分）
+    df['个人总积分'] = (df['销售额目标分'] + df['回款额目标分'] + df['超期账款追回分'] +
+                        df['销售排名分'] + df['回款排名分'] +
+                        df['销售进步分'] + df['回款进步分'] + df['小组加分'] + df['基础分'])
+    # 保留两位小数
+    score_columns = ['销售额目标分', '回款额目标分', '超期账款追回分',
+                     '销售排名分', '回款排名分', '销售进步分', '回款进步分', '小组加分', '基础分', '个人总积分']
+    df[score_columns] = df[score_columns].round(2)
+    return df
+
+
+def calculate_group_scores(score_data):
+    """计算小组总积分和加权小组总分"""
+    # 使用组别编号而不是队名进行分组计算
+    group_scores = score_data.groupby('组别')['个人总积分'].sum().reset_index()
+    # 小组总积分 = 个人总积分之和
+    group_scores['小组总积分'] = group_scores['个人总积分'].round(2)
+
+    # 计算加权小组总分
+    # 计算每组人数
+    group_counts = score_data.groupby('组别').size().reset_index(name='小组人数')
+    group_scores = pd.merge(group_scores, group_counts, on='组别')
+
+    # 新规则：加权小组总分 = 小组总积分 * 2 / 小组成员数
+    group_scores['加权小组总分'] = (group_scores['小组总积分'] * 2 / group_scores['小组人数']).round(2)
+
+    # 映射回原数据
+    group_score_mapping = group_scores.set_index('组别')['小组总积分'].to_dict()
+    weighted_score_mapping = group_scores.set_index('组别')['加权小组总分'].to_dict()
+
+    score_data['小组总积分'] = score_data['组别'].map(group_score_mapping)
+    score_data['加权小组总分'] = score_data['组别'].map(weighted_score_mapping)
+
+    return score_data
+
+
+def create_daily_sales_data(daily_df, target_year, target_month):
+    """创建每日销售回款数据表"""
+    # 获取该月的所有日期
+    days_in_month = calendar.monthrange(target_year, target_month)[1]
+
+    # 创建日期列名
+    date_columns = []
+    for day in range(1, days_in_month + 1):
+        date_obj = datetime(target_year, target_month, day)
+        weekday_name = ['一', '二', '三', '四', '五', '六', '日'][date_obj.weekday()]
+        date_columns.extend([
+            f'{day}号\n星期{weekday_name}\n销售额',
+            f'{day}号\n星期{weekday_name}\n回款额'
+        ])
+
+    # 获取所有员工
+    all_employees = daily_df['员工姓名'].unique()
+
+    # 分组映射
+    group_mapping = {
+        '吴洋': 1, '宋建涛': 1,
+        '周伴伴': 2, '简雪婷': 2, '魏俊峰': 2,
+        '沈文鑫': 3, '郭庚华': 3,
+        '王杰': 4, '韩淇': 4,
+        '苏晓彤': 5, '樊格格': 5,
+        '赵雨': 6, '张万梅': 6
+    }
+
+    def safe_map_group(name):
+        return group_mapping.get(name, 99)
+
+    # 创建结果数据
+    result_data = []
+
+    for employee in all_employees:
+        employee_data = daily_df[daily_df['员工姓名'] == employee].copy()
+
+        # 基础信息
+        row = {
+            '统计月份': f"{target_year}年{target_month}月",
+            '队名': TEAM_NAME_MAPPING[safe_map_group(employee)],
+            '员工姓名': employee
+        }
+
+        # 填充每日数据 - 使用全局常量列名
+        for day in range(1, days_in_month + 1):
+            date_obj = datetime(target_year, target_month, day)
+            weekday_name = ['一', '二', '三', '四', '五', '六', '日'][date_obj.weekday()]
+
+            # 查找该日期的数据
+            day_data = employee_data[employee_data['实际日期'].dt.day == day]
+
+            if not day_data.empty:
+                # 使用常量列名
+                sales = day_data[SALES_COL].iloc[0]
+
+                # 直接相加计算回款额
+                payment = day_data[NORMAL_PAYMENT_COL].iloc[0] + day_data[OVERDUE_PAYMENT_COL].iloc[0]
+            else:
+                sales = 0
+                payment = 0
+
+            row[f'{day}号\n星期{weekday_name}\n销售额'] = sales
+            row[f'{day}号\n星期{weekday_name}\n回款额'] = payment
+
+        result_data.append(row)
+
+    # 创建DataFrame
+    daily_sales_df = pd.DataFrame(result_data)
+
+    # 按组别排序
+    daily_sales_df['组别'] = daily_sales_df['员工姓名'].apply(safe_map_group)
+
+    # 组内排序
+    group_order = {
+        1: ['吴洋', '宋建涛'],
+        2: ['周伴伴', '简雪婷', '魏俊峰'],
+        3: ['沈文鑫', '郭庚华'],
+        4: ['王杰', '韩淇'],
+        5: ['苏晓彤', '樊格格'],
+        6: ['赵雨', '张万梅']
+    }
+
+    def get_group_order(row):
+        group = row['组别']
+        name = row['员工姓名']
+        if group in group_order and name in group_order[group]:
+            return group_order[group].index(name)
+        else:
+            return 99
+
+    daily_sales_df['组内顺序'] = daily_sales_df.apply(get_group_order, axis=1)
+    daily_sales_df = daily_sales_df.sort_values(by=['组别', '组内顺序'])
+
+    # 删除辅助列
+    daily_sales_df = daily_sales_df.drop(columns=['组别', '组内顺序'])
+
+    # 添加合计行
+    # 获取所有数值列（除了前三列：统计月份、队名、员工姓名）
+    numeric_cols = daily_sales_df.columns[3:]
+
+    # 计算每列的总和或平均值
+    total_row = {}
+    for col in numeric_cols:
+        # 对于进度列使用平均值，其他列使用总和
+        if '进度' in col or '比率' in col or '比例' in col:
+            # 排除可能的NaN值
+            valid_values = daily_sales_df[col].dropna()
+            if len(valid_values) > 0:
+                total_row[col] = valid_values.mean()
+            else:
+                total_row[col] = 0
+        else:
+            # 确保每列都被正确计算
+            total_row[col] = daily_sales_df[col].sum()
+
+    # 添加标题列
+    total_row['统计月份'] = '合计'
+    total_row['队名'] = ''
+    total_row['员工姓名'] = ''
+
+    # 检查是否有任何列没有被计算
+    for col in daily_sales_df.columns:
+        if col not in total_row and col not in ['统计月份', '队名', '员工姓名']:
+            total_row[col] = daily_sales_df[col].sum()
+
+    # 将合计行添加到DataFrame
+    daily_sales_df = pd.concat([daily_sales_df, pd.DataFrame([total_row])], ignore_index=True)
+
+    return daily_sales_df
+
+
+def process_sales_data(target_month=None, target_year=None):
+    """主流程：读取、清洗、计算、输出销售回款和积分数据"""
+    current_date = datetime.now()
+    if target_year is None:
+        target_year = current_date.year
+    if target_month is None:
+        target_month = current_date.month
+    print(f"正在处理 {target_year}年{target_month}月 的销售回款数据...")
+
+    # 获取脚本目录和数据文件路径
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    daily_file = os.path.join(script_dir, '每日销售回款额.xlsx')
+    monthly_file = os.path.join(script_dir, '上月销售回款额.xlsx')
+
+    # 检查文件是否存在
+    if not os.path.exists(daily_file):
+        print(f"错误：找不到文件 {daily_file}")
+        print("请确保文件存在于脚本所在目录")
+        return None, None
+
+    try:
+        # 读取每日数据并检查列
+        daily_df = pd.read_excel(daily_file)
+        check_required_columns(daily_df, REQUIRED_DAILY_COLS, '每日销售回款额.xlsx')
+
+        # 修改点：使用"所在部门"列代替"所属部门"
+        if DEPARTMENT_COL not in daily_df.columns:
+            print(f"警告：每日销售回款数据缺少'{DEPARTMENT_COL}'列，部门统计功能将无法使用")
+            has_department_col = False
+        else:
+            has_department_col = True
+
+        # 读取上月数据并检查列（可选）
+        monthly_df = pd.read_excel(monthly_file) if os.path.exists(monthly_file) else None
+        if monthly_df is not None:
+            check_required_columns(monthly_df, REQUIRED_MONTHLY_COLS, '上月销售回款额.xlsx')
+    except Exception as e:
+        print(f"读取Excel文件时出错: {e}")
+        return None, None
+
+    # 清洗姓名
+    daily_df['员工姓名'] = daily_df[NAME_COL].apply(clean_name)
+
+    # 修改点：清洗"所在部门"名称
+    if has_department_col:
+        daily_df[DEPARTMENT_COL] = daily_df[DEPARTMENT_COL].apply(lambda x: clean_name(x) if not pd.isna(x) else "未知")
+
+    # 金额列转换 - 使用常量
+    amount_cols = [SALES_COL, NORMAL_PAYMENT_COL, OVERDUE_COL, OVERDUE_PAYMENT_COL]
+    for col in amount_cols:
+        if col in daily_df.columns:
+            daily_df[col] = daily_df[col].apply(convert_amount)
+
+    # 日期转换
+    daily_df['实际日期'] = pd.to_datetime(daily_df[DATE_COL], errors='coerce')
+
+    # 只保留目标月份数据
+    daily_df = daily_df[(daily_df['实际日期'].dt.month == target_month) &
+                        (daily_df['实际日期'].dt.year == target_year)]
+
+    if daily_df.empty:
+        print(f"警告：没有找到 {target_year}年{target_month}月 的每日数据！")
+        return None, None
+
+    # 计算当日回款总额
+    daily_df['当日回款总额'] = daily_df[NORMAL_PAYMENT_COL] + daily_df[OVERDUE_PAYMENT_COL]
+
+    # 计算周数（每月最多5周）
+    daily_df['周数'] = daily_df['实际日期'].apply(
+        lambda d: (d.day - 1) // 7 + 1 if not pd.isna(d) else np.nan
+    )
+
+    # 按员工和周数分组汇总，超期欠款取最后一条记录
+    weekly_agg = {
+        '周销售额': (SALES_COL, 'sum'),
+        '周正常回款额': (NORMAL_PAYMENT_COL, 'sum'),
+        '周超期回款额': (OVERDUE_PAYMENT_COL, 'sum'),
+        '周回款总额': ('当日回款总额', 'sum'),
+    }
+
+    def get_last_overdue(series):
+        return series.iloc[-1] if not series.empty else 0
+
+    weekly_overdue = daily_df.sort_values('实际日期').groupby(['员工姓名', '周数'])[OVERDUE_COL].apply(
+        get_last_overdue).reset_index()
+    weekly_overdue = weekly_overdue.rename(columns={OVERDUE_COL: '周逾期未收回额'})
+
+    weekly_totals = daily_df.groupby(['员工姓名', '周数']).agg(**weekly_agg).reset_index()
+    weekly_totals = pd.merge(weekly_totals, weekly_overdue, on=['员工姓名', '周数'], how='left')
+
+    # 构建所有员工所有周的完整网格，防止有员工某周无数据
+    all_employees = daily_df['员工姓名'].unique()
+    all_weeks = range(1, 6)
+    full_grid = pd.MultiIndex.from_product([all_employees, all_weeks], names=['员工姓名', '周数']).to_frame(index=False)
+
+    # 合并周数据
+    weekly_pivot = pd.merge(
+        full_grid,
+        weekly_totals,
+        on=['员工姓名', '周数'],
+        how='left'
+    ).fillna(0)
+
+    # 透视表格式化
+    pivot_df = weekly_pivot.pivot_table(
+        index='员工姓名',
+        columns='周数',
+        values=['周销售额', '周正常回款额', '周超期回款额', '周回款总额', '周逾期未收回额'],
+        fill_value=0
+    )
+
+    # 扁平化多级列索引并重命名
+    weekly_col_mapping = {
+        '周销售额': '销售额',
+        '周正常回款额': '回未超期款',
+        '周超期回款额': '回超期款',
+        '周回款总额': '回款合计',
+        '周逾期未收回额': '逾期未收回额'
+    }
+    pivot_df.columns = [f"第{week}周{weekly_col_mapping.get(col, col)}" for col, week in pivot_df.columns]
+    pivot_df = pivot_df.reset_index()
+
+    # 月度汇总
+    monthly_total = daily_df.groupby('员工姓名').agg(
+        本月销售额=(SALES_COL, 'sum'),
+        本月回未超期款=(NORMAL_PAYMENT_COL, 'sum'),
+        本月回超期款=(OVERDUE_PAYMENT_COL, 'sum'),
+        本月回款合计=('当日回款总额', 'sum')
+    ).reset_index()
+
+    # 处理上月数据
+    if monthly_df is not None:
+        monthly_df['员工姓名'] = monthly_df[NAME_COL].apply(clean_name)
+        if LAST_MONTH_SALES_COL in monthly_df.columns and LAST_MONTH_PAYMENT_COL in monthly_df.columns:
+            monthly_df[LAST_MONTH_SALES_COL] = monthly_df[LAST_MONTH_SALES_COL].apply(convert_amount)
+            monthly_df[LAST_MONTH_PAYMENT_COL] = monthly_df[LAST_MONTH_PAYMENT_COL].apply(convert_amount)
+            # 不再重命名列，直接使用原始列名
+        else:
+            print("警告：上月文件中缺少销售额或回款额列，将忽略上月数据")
+            monthly_df = None
+
+    # 合并月度和上月数据
+    sales_data = monthly_total.copy()
+
+    if monthly_df is not None:
+        last_month = monthly_df[['员工姓名', LAST_MONTH_SALES_COL, LAST_MONTH_PAYMENT_COL]]
+        sales_data = pd.merge(sales_data, last_month, on='员工姓名', how='left')
+    else:
+        sales_data[LAST_MONTH_SALES_COL] = 0
+        sales_data[LAST_MONTH_PAYMENT_COL] = 0
+
+    # 添加周数据
+    sales_data = pd.merge(sales_data, pivot_df, on='员工姓名', how='left')
+
+    # ====== 新增：添加本月销售任务和销售业绩完成进度 ======
+    # 不同员工的销售任务额
+    sales_task_mapping = {
+        '赵雨': 250000,
+        '周伴伴': 250000,
+        '宋建涛': 300000,
+        '简雪婷': 250000,
+        '苏晓彤': 300000,
+        '樊格格': 250000,
+        '王杰': 600000,
+        '沈文鑫': 500000,
+        '郭庚华': 350000,
+        '韩淇': 400000,
+        '吴洋': 700000,
+        '张万梅': 350000,
+        '魏俊峰': 350000
+    }
+
+    # 添加本月销售任务列
+    sales_data['本月销售任务'] = sales_data['员工姓名'].map(sales_task_mapping).fillna(0)
+
+    # 计算销售业绩完成进度
+    sales_data['销售业绩完成进度'] = (sales_data['本月销售额'] / sales_data['本月销售任务']).fillna(0)
+
+    # ====== 新增：添加本月回款任务和回款业绩完成进度 ======
+    # 不同员工的回款任务额
+    payment_task_mapping = {
+        '赵雨': 250000,
+        '周伴伴': 250000,
+        '宋建涛': 250000,
+        '简雪婷': 110000,
+        '苏晓彤': 150000,
+        '樊格格': 200000,
+        '王杰': 300000,
+        '沈文鑫': 500000,
+        '郭庚华': 500000,
+        '韩淇': 200000,
+        '吴洋': 800000,
+        '张万梅': 300000,
+        '魏俊峰': 400000
+    }
+
+    # 添加本月回款任务列
+    sales_data['本月回款任务'] = sales_data['员工姓名'].map(payment_task_mapping).fillna(0)
+
+    # 计算回款业绩完成进度
+    sales_data['回款业绩完成进度'] = (sales_data['本月回款合计'] / sales_data['本月回款任务']).fillna(0)
+    # =================================================
+
+    # ====== 新增：根据规则计算"月末逾期未收回额" ======
+    # 规则：取每个员工在统计月份中最后一天记录的"超期欠款"值
+    # 使用 .loc 和 .idxmax() 高效地找到每个员工最后一条记录的索引
+    if not daily_df.empty:
+        last_day_df = daily_df.loc[daily_df.groupby('员工姓名')['实际日期'].idxmax()]
+        # 使用原始列名"超期账款（未追回）"
+        last_day_overdue = last_day_df[['员工姓名', OVERDUE_COL]].rename(columns={OVERDUE_COL: '月末逾期未收回额'})
+        # 合并到主数据表
+        sales_data = pd.merge(sales_data, last_day_overdue, on='员工姓名', how='left')
+        sales_data['月末逾期未收回额'] = sales_data['月末逾期未收回额'].fillna(0)
+    else:
+        sales_data['月末逾期未收回额'] = 0
+    # =================================================
+
+    # 添加月份标记
+    sales_data['统计月份'] = f"{target_year}年{target_month}月"
+
+    # 分组映射（使用新的队名）
+    group_mapping = {
+        '吴洋': 1, '宋建涛': 1,
+        '周伴伴': 2, '简雪婷': 2, '魏俊峰': 2,
+        '沈文鑫': 3, '郭庚华': 3,
+        '王杰': 4, '韩淇': 4,
+        '苏晓彤': 5, '樊格格': 5,
+        '赵雨': 6, '张万梅': 6
+    }
+
+    # 分组安全映射，找不到的员工分配到99组
+    def safe_map_group(name):
+        if name in group_mapping:
+            return group_mapping[name]
+        else:
+            print(f"警告：员工 {name} 未在分组映射中，已分配到组别99")
+            return 99
+
+    sales_data['组别'] = sales_data['员工姓名'].apply(safe_map_group)
+
+    # 将数字组别映射为队名
+    sales_data['队名'] = sales_data['组别'].map(TEAM_NAME_MAPPING)
+
+    # 组内排序顺序（使用新的队名分组）
+    group_order = {
+        1: ['吴洋', '宋建涛'],
+        2: ['周伴伴', '简雪婷', '魏俊峰'],
+        3: ['沈文鑫', '郭庚华'],
+        4: ['王杰', '韩淇'],
+        5: ['苏晓彤', '樊格格'],
+        6: ['赵雨', '张万梅']
+    }
+
+    # 组内排序
+    def get_group_order(row):
+        group = row['组别']  # 使用组别编号进行排序
+        name = row['员工姓名']
+        if group in group_order and name in group_order[group]:
+            return group_order[group].index(name)
+        else:
+            print(f"警告：员工 {name} 未在组别{group}的排序中，已分配到组内顺序99")
+            return 99
+
+    sales_data['组内顺序'] = sales_data.apply(get_group_order, axis=1)
+
+    # 按组别和组内顺序排序
+    sales_data = sales_data.sort_values(by=['组别', '组内顺序'])
+
+    # 删除内部使用的列
+    sales_data = sales_data.drop(columns=['组别', '组内顺序'])
+
+    # 添加合计行
+    # 获取所有数值列（除了前三列：统计月份、队名、员工姓名）
+    numeric_cols = sales_data.columns[3:]
+
+    # 计算每列的总和或平均值
+    total_row = {}
+    for col in numeric_cols:
+        # 对于进度列使用平均值，其他列使用总和
+        if col in ['销售业绩完成进度', '回款业绩完成进度']:
+            # 排除可能的NaN值
+            valid_values = sales_data[col].dropna()
+            if len(valid_values) > 0:
+                total_row[col] = valid_values.mean()
+            else:
+                total_row[col] = 0
+        else:
+            # 确保每列都被正确计算，特别是本月销售额和本月回未超期款
+            total_row[col] = sales_data[col].sum()
+
+    # 添加标题列
+    total_row['统计月份'] = '合计'
+    total_row['队名'] = ''
+    total_row['员工姓名'] = ''
+
+    # 检查是否有任何列没有被计算
+    for col in sales_data.columns:
+        if col not in total_row and col not in ['统计月份', '队名', '员工姓名']:
+            total_row[col] = sales_data[col].sum()
+
+    # 将合计行添加到DataFrame
+    sales_data = pd.concat([sales_data, pd.DataFrame([total_row])], ignore_index=True)
+
+    # 按照新的列顺序重新排列销售回款数据
+    desired_sales_columns = [
+        '统计月份', '队名', '员工姓名',
+        '第1周销售额', '第1周回未超期款', '第1周回超期款', '第1周回款合计', '第1周逾期未收回额',
+        '第2周销售额', '第2周回未超期款', '第2周回超期款', '第2周回款合计', '第2周逾期未收回额',
+        '第3周销售额', '第3周回未超期款', '第3周回超期款', '第3周回款合计', '第3周逾期未收回额',
+        '第4周销售额', '第4周回未超期款', '第4周回超期款', '第4周回款合计', '第4周逾期未收回额',
+        '第5周销售额', '第5周回未超期款', '第5周回超期款', '第5周回款合计', '第5周逾期未收回额',
+        '上月销售额', '上月回款额', '本月销售额', '本月销售任务', '销售业绩完成进度',
+        '本月回未超期款', '本月回超期款', '本月回款合计', '本月回款任务', '回款业绩完成进度',
+        '月末逾期未收回额'
+    ]
+
+    # 检查哪些列实际存在，只保留存在的列
+    existing_sales_columns = [col for col in desired_sales_columns if col in sales_data.columns]
+
+    # 添加任何遗漏的列（如果有的话）
+    remaining_columns = [col for col in sales_data.columns if col not in existing_sales_columns]
+    final_sales_columns = existing_sales_columns + remaining_columns
+    sales_data = sales_data[final_sales_columns]
+
+    # 创建每日销售回款数据
+    daily_sales_data = create_daily_sales_data(daily_df, target_year, target_month)
+
+    # 计算积分数据
+    score_data = sales_data.copy()
+
+    # 添加组别列用于积分计算
+    score_data['组别'] = score_data['员工姓名'].apply(safe_map_group)
+    score_data = calculate_scores(score_data)
+    score_data = calculate_group_scores(score_data)
+
+    # 组内排序（使用组别编号进行排序）
+    score_data['组别_排序'] = score_data['员工姓名'].apply(safe_map_group)
+    score_data['组内顺序'] = score_data.apply(get_group_order, axis=1)
+    score_data = score_data.sort_values(by=['组别_排序', '组内顺序'])
+
+    # 删除内部使用的列
+    score_data = score_data.drop(columns=['组别', '组别_排序', '组内顺序'])
+
+    # 只保留积分相关列
+    score_columns = [
+        '统计月份', '队名', '员工姓名', '销售额目标分', '回款额目标分', '超期账款追回分',
+        '销售排名分', '回款排名分', '销售进步分', '回款进步分', '基础分', '小组加分', '个人总积分', '小组总积分',
+        '加权小组总分'
+    ]
+    score_data = score_data[score_columns]
+
+    # ====== 修改部门统计功能使用"所在部门"列 ======
+    def create_department_summary(daily_df, target_year, target_month):
+        """创建部门销售回款统计表"""
+        # 检查是否有部门数据
+        if DEPARTMENT_COL not in daily_df.columns:
+            print(f"警告：无法创建部门统计表，缺少'{DEPARTMENT_COL}'列")
+            return None
+
+        # 部门名称标准化
+        department_mapping = {
+            '大客户': '大客户组',
+            '经理室': '经理室',
+            '801': '801组',
+            '901': '901组',
+            '大客户组': '大客户组',
+            '经理室组': '经理室'
+        }
+
+        # 修改点：使用部门列进行标准化
+        daily_df['标准化部门'] = daily_df[DEPARTMENT_COL].map(department_mapping).fillna(daily_df[DEPARTMENT_COL])
+
+        # 保留指定部门
+        valid_departments = ['大客户组', '经理室', '801组', '901组']
+        department_df = daily_df[daily_df['标准化部门'].isin(valid_departments)].copy()
+
+        if department_df.empty:
+            print("警告：没有找到有效的部门数据！")
+            return None
+
+        # 计算周数
+        department_df['周数'] = department_df['实际日期'].apply(
+            lambda d: (d.day - 1) // 7 + 1 if not pd.isna(d) else np.nan
+        )
+
+        # --- 周度数据计算 ---
+        # 1. 汇总销售额和回款额 - 使用全局常量列名
+        dept_weekly_agg = department_df.groupby(['标准化部门', '周数']).agg(
+            销售额=(SALES_COL, 'sum'),
+            回未超期款=(NORMAL_PAYMENT_COL, 'sum'),
+            回超期款=(OVERDUE_PAYMENT_COL, 'sum')
+        ).reset_index()
+
+        # 2. 计算周回款合计
+        dept_weekly_agg['回款合计'] = dept_weekly_agg['回未超期款'] + dept_weekly_agg['回超期款']
+
+        # 3. 计算周逾期未收回额 (部门内所有员工在当周最后一天的欠款之和)
+        last_day_in_week_df = department_df.sort_values('实际日期').groupby(['标准化部门', '员工姓名', '周数']).tail(1)
+        dept_weekly_overdue = last_day_in_week_df.groupby(['标准化部门', '周数'])[OVERDUE_COL].sum().reset_index()
+        dept_weekly_overdue = dept_weekly_overdue.rename(columns={OVERDUE_COL: '逾期未收回额'})
+
+        # 4. 合并周数据
+        dept_weekly = pd.merge(dept_weekly_agg, dept_weekly_overdue, on=['标准化部门', '周数'], how='left')
+
+        # 构建所有部门所有周的完整网格
+        all_depts = valid_departments
+        all_weeks = range(1, 6)
+        full_grid = pd.MultiIndex.from_product([all_depts, all_weeks], names=['标准化部门', '周数']).to_frame(
+            index=False)
+
+        # 合并周数据到完整网格
+        dept_weekly = pd.merge(
+            full_grid,
+            dept_weekly,
+            on=['标准化部门', '周数'],
+            how='left'
+        ).fillna(0)
+
+        # --- 月度数据计算 ---
+        # 1. 汇总月度销售额和回款额 - 使用全局常量列名
+        dept_monthly = department_df.groupby('标准化部门').agg(
+            本月销售额=(SALES_COL, 'sum'),
+            本月回未超期款=(NORMAL_PAYMENT_COL, 'sum'),
+            本月回超期款=(OVERDUE_PAYMENT_COL, 'sum')
+        ).reset_index()
+
+        # 2. 计算月度回款合计
+        dept_monthly['本月回款合计'] = dept_monthly['本月回未超期款'] + dept_monthly['本月回超期款']
+
+        # 3. 计算月末逾期未收回额 (部门内所有员工在当月最后一天的欠款之和)
+        last_day_in_month_df = department_df.sort_values('实际日期').groupby(['标准化部门', '员工姓名']).tail(1)
+        dept_monthly_overdue = last_day_in_month_df.groupby('标准化部门')[OVERDUE_COL].sum().reset_index()
+        dept_monthly_overdue = dept_monthly_overdue.rename(columns={OVERDUE_COL: '月末逾期未收回额'})
+
+        # 4. 合并月度数据
+        dept_monthly = pd.merge(dept_monthly, dept_monthly_overdue, on='标准化部门', how='left')
+
+        # 创建透视表
+        dept_pivot = dept_weekly.pivot_table(
+            index='标准化部门',
+            columns='周数',
+            values=['销售额', '回未超期款', '回超期款', '回款合计', '逾期未收回额'],
+            fill_value=0
+        )
+
+        # 扁平化多级列索引
+        dept_pivot.columns = [f"第{week}周{col}" for col, week in dept_pivot.columns]
+        dept_pivot = dept_pivot.reset_index()
+
+        # 合并月度数据
+        dept_summary = pd.merge(dept_pivot, dept_monthly, on='标准化部门', how='left').fillna(0)
+
+        # 重命名列
+        dept_summary = dept_summary.rename(columns={
+            '标准化部门': '部门',
+        })
+
+        # 添加合计行
+        total_row = dept_summary.select_dtypes(include=[np.number]).sum()
+        total_row['部门'] = '合计'
+        dept_summary = pd.concat([dept_summary, pd.DataFrame([total_row])], ignore_index=True)
+
+        # 列顺序
+        columns_order = ['部门']
+        for week in range(1, 6):
+            columns_order.extend([
+                f'第{week}周销售额',
+                f'第{week}周回未超期款',
+                f'第{week}周回超期款',
+                f'第{week}周回款合计',
+                f'第{week}周逾期未收回额'
+            ])
+        columns_order.extend([
+            '本月销售额',
+            '本月回未超期款',
+            '本月回超期款',
+            '本月回款合计',
+            '月末逾期未收回额'
+        ])
+
+        # 只保留存在的列
+        existing_columns = [col for col in columns_order if col in dept_summary.columns]
+        dept_summary = dept_summary[existing_columns]
+
+        return dept_summary
+
+    # 创建部门统计表
+    department_summary = None
+    if has_department_col:
+        # 修改点：传递正确的列名
+        department_summary = create_department_summary(daily_df, target_year, target_month)
+
+    # 控制台输出部分数据预览
+    print(f"\n{target_year}年{target_month}月 销售回款数据统计：")
+    print(sales_data[['队名', '员工姓名', '本月销售额', '本月回款合计', LAST_MONTH_SALES_COL]].head(3).to_string(
+        index=False))
+    print("\n... (更多数据请查看Excel文件)")
+
+    print(f"\n{target_year}年{target_month}月 员工积分统计：")
+    print(score_data[['队名', '员工姓名', '个人总积分', '小组总积分', '加权小组总分']].head(3).to_string(index=False))
+    print("\n... (更多数据请查看Excel文件)")
+
+    # 保存结果到Excel
+    output_file = os.path.join(script_dir, f"员工销售回款统计_{target_year}年{target_month}月.xlsx")
+    with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+        # 每日销售回款数据（排在最前面）
+        daily_sales_data.to_excel(writer, index=False, sheet_name='每日销售回款数据')
+        apply_excel_styles(writer, '每日销售回款数据', is_score_sheet=False, is_daily_sheet=True)
+
+        # 销售回款数据统计
+        sales_data.to_excel(writer, index=False, sheet_name='销售回款数据统计')
+        apply_excel_styles(writer, '销售回款数据统计', is_score_sheet=False, is_daily_sheet=False)
+
+        # 新增销售回款超期账款排名表（放在销售回款数据统计后面）
+        ranking_data = create_ranking_sheet(sales_data, target_year, target_month)
+        if not ranking_data.empty:
+            ranking_data.to_excel(writer, index=False, sheet_name='销售回款超期账款排名')
+            apply_ranking_styles(writer, '销售回款超期账款排名')
+            print(f"\n{target_year}年{target_month}月 销售回款超期账款排名数据生成完成")
+
+        # 部门销售回款统计（新增）
+        if department_summary is not None:
+            department_summary.to_excel(writer, index=False, sheet_name='部门销售回款统计')
+            apply_excel_styles(writer, '部门销售回款统计', is_score_sheet=False, is_daily_sheet=False)
+            print(f"\n{target_year}年{target_month}月 部门销售回款统计：")
+            print(department_summary.head(3).to_string(index=False))
+            print("\n... (更多数据请查看Excel文件)")
+
+        # 员工积分数据
+        score_data.to_excel(writer, index=False, sheet_name='员工积分数据')
+        apply_excel_styles(writer, '员工积分数据', is_score_sheet=True, is_daily_sheet=False)
+
+    # 控制台输出更新
+    sheets = "1. 每日销售回款数据  2. 销售回款数据统计  3. 销售回款超期账款排名"
+    if department_summary is not None:
+        sheets += "  4. 部门销售回款统计"
+        sheets += "  5. 员工积分数据"
+    else:
+        sheets += "  4. 员工积分数据"
+
+    print(f"\n结果已保存到: {output_file}")
+    print(f"包含以下工作表: {sheets}")
+
+    return sales_data, score_data
+
+
+def create_ranking_sheet(sales_data, target_year, target_month):
+    """创建销售回款超期账款排名表"""
+    # 选择需要的列数据，排除合计行
+    ranking_data = sales_data[sales_data['员工姓名'] != ''][
+        ['员工姓名', '第1周销售额', '第2周销售额', '第3周销售额', '第4周销售额', '第5周销售额',
+         '第1周回款合计', '第2周回款合计', '第3周回款合计', '第4周回款合计', '第5周回款合计',
+         '本月销售额', '本月回款合计', '月末逾期未收回额']].copy()
+
+    # 创建结果DataFrame
+    result_columns = ['排名类型', '排名', '姓名', '金额(万元)']
+    result_data = []
+
+    # 处理每周销售额排名
+    for week in range(1, 6):
+        week_sales_column = f'第{week}周销售额'
+        # 过滤小于10000的数据
+        week_data = ranking_data[ranking_data[week_sales_column] >= 10000].copy()
+        if not week_data.empty:
+            # 计算排名
+            week_data['排名'] = week_data[week_sales_column].rank(ascending=False, method='min').astype(int)
+            # 转换为万元单位并取整
+            week_data['金额(万元)'] = (week_data[week_sales_column] / 10000).astype(int)
+            # 添加到结果数据
+            for _, row in week_data.sort_values('排名').iterrows():
+                result_data.append([
+                    f'第{week}周销售额',
+                    int(row['排名']),
+                    row['员工姓名'],
+                    int(row['金额(万元)'])
+                ])
+
+    # 处理本月销售额排名
+    monthly_sales = ranking_data[ranking_data['本月销售额'] >= 10000].copy()
+    if not monthly_sales.empty:
+        monthly_sales['排名'] = monthly_sales['本月销售额'].rank(ascending=False, method='min').astype(int)
+        monthly_sales['金额(万元)'] = (monthly_sales['本月销售额'] / 10000).astype(int)
+        for _, row in monthly_sales.sort_values('排名').iterrows():
+            result_data.append([
+                '本月销售额',
+                int(row['排名']),
+                row['员工姓名'],
+                int(row['金额(万元)'])
+            ])
+
+    # 处理每周回款额排名
+    for week in range(1, 6):
+        week_payment_column = f'第{week}周回款合计'
+        # 过滤小于10000的数据
+        week_data = ranking_data[ranking_data[week_payment_column] >= 10000].copy()
+        if not week_data.empty:
+            # 计算排名
+            week_data['排名'] = week_data[week_payment_column].rank(ascending=False, method='min').astype(int)
+            # 转换为万元单位并取整
+            week_data['金额(万元)'] = (week_data[week_payment_column] / 10000).astype(int)
+            # 添加到结果数据
+            for _, row in week_data.sort_values('排名').iterrows():
+                result_data.append([
+                    f'第{week}周回款额',
+                    int(row['排名']),
+                    row['员工姓名'],
+                    int(row['金额(万元)'])
+                ])
+
+    # 处理本月回款额排名
+    monthly_payment = ranking_data[ranking_data['本月回款合计'] >= 10000].copy()
+    if not monthly_payment.empty:
+        monthly_payment['排名'] = monthly_payment['本月回款合计'].rank(ascending=False, method='min').astype(int)
+        monthly_payment['金额(万元)'] = (monthly_payment['本月回款合计'] / 10000).astype(int)
+        for _, row in monthly_payment.sort_values('排名').iterrows():
+            result_data.append([
+                '本月回款额',
+                int(row['排名']),
+                row['员工姓名'],
+                int(row['金额(万元)'])
+            ])
+
+    # 逾期清收失职警示榜（所有数据都显示，不过滤小于1万的）
+    # 首先确保所有逾期记录是连续排列的
+    overdue_data = ranking_data.copy()
+    overdue_data = overdue_data[overdue_data['月末逾期未收回额'] > 0].copy()  # 只保留有逾期未收回的
+    if not overdue_data.empty:
+        overdue_data['排名'] = overdue_data['月末逾期未收回额'].rank(ascending=False, method='min').astype(int)
+        overdue_data['金额(万元)'] = (overdue_data['月末逾期未收回额'] / 10000).round(2)  # 保留2位小数
+
+        # 按排名排序
+        overdue_data = overdue_data.sort_values('排名')
+
+        # 添加所有逾期数据（连续添加）
+        for _, row in overdue_data.iterrows():
+            result_data.append([
+                '逾期清收失职警示榜',
+                int(row['排名']),
+                row['员工姓名'],
+                row['金额(万元)']
+            ])
+
+    # 创建结果DataFrame
+    result_df = pd.DataFrame(result_data, columns=result_columns)
+
+    return result_df
+
+
+def apply_ranking_styles(writer, sheet_name):
+    """为销售回款超期账款排名工作表设置样式"""
+    workbook = writer.book
+    worksheet = workbook[sheet_name]
+
+    # 设置列宽
+    worksheet.column_dimensions['A'].width = 22  # 排名类型列，特别是逾期清收失职警示榜需要更宽
+    worksheet.column_dimensions['B'].width = 8  # 排名列
+    worksheet.column_dimensions['C'].width = 12  # 姓名列
+    worksheet.column_dimensions['D'].width = 12  # 金额列
+
+    # 表头样式
+    header_font = Font(bold=True, color='FFFFFF', size=12)
+    header_fill = PatternFill(start_color='1F4E79', end_color='1F4E79', fill_type='solid')  # 深蓝色
+    header_alignment = Alignment(horizontal='center', vertical='center')
+
+    # 数据样式
+    data_font = Font(size=11)
+    data_alignment = Alignment(horizontal='center', vertical='center')
+    data_border = Border(left=Side(style='thin'),
+                         right=Side(style='thin'),
+                         top=Side(style='thin'),
+                         bottom=Side(style='thin'))
+
+    # 浅红色填充（用于逾期清收失职警示榜）
+    light_red_fill = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
+
+    # 应用表头样式
+    for cell in worksheet[1]:
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_alignment
+        cell.border = data_border
+
+    # 标记逾期清收失职警示榜的开始行和结束行
+    overdue_start_row = -1
+    overdue_end_row = -1
+    current_type = None
+
+    # 找到逾期清收失职警示榜的行范围并标记出不同类型数据的分界
+    type_boundaries = []  # 存储不同类型数据的起始行
+
+    for row_idx, row in enumerate(worksheet.iter_rows(min_row=2, max_row=worksheet.max_row), 2):
+        if row[0].value != current_type:
+            current_type = row[0].value
+            type_boundaries.append(row_idx)
+
+            if current_type == '逾期清收失职警示榜':
+                overdue_start_row = row_idx
+
+        # 如果已找到逾期清收失职警示榜的开始行，且当前行仍是该类型的最后一行
+        if overdue_start_row > 0 and current_type == '逾期清收失职警示榜':
+            overdue_end_row = row_idx
+
+    type_boundaries.append(worksheet.max_row + 1)  # 添加最后一个边界
+
+    # 应用数据样式和在不同排名类型之间插入空行
+    for i in range(len(type_boundaries) - 1):
+        start_row = type_boundaries[i]
+        end_row = type_boundaries[i + 1] - 1
+
+        # 对每个区域应用样式
+        for row_idx in range(start_row, end_row + 1):
+            for cell in worksheet[row_idx]:
+                cell.font = data_font
+                cell.alignment = data_alignment
+                cell.border = data_border
+
+                # 为逾期清收失职警示榜应用浅红色填充
+                if row_idx >= overdue_start_row and (overdue_end_row == -1 or row_idx <= overdue_end_row):
+                    cell.fill = light_red_fill
+
+                # 设置金额列数字格式
+                if cell.column == 4:  # D列（金额列）
+                    if row_idx >= overdue_start_row and (overdue_end_row == -1 or row_idx <= overdue_end_row):
+                        cell.number_format = '0.00'  # 保留2位小数
+                    else:
+                        cell.number_format = '0'  # 整数
+
+        # 在每组数据后添加空行（最后一组除外）
+        if i < len(type_boundaries) - 2:
+            worksheet.insert_rows(end_row + 1)
+            worksheet.row_dimensions[end_row + 1].height = 10
+
+            # 更新后续边界
+            for j in range(i + 1, len(type_boundaries)):
+                type_boundaries[j] += 1
+
+            if overdue_start_row > end_row + 1:
+                overdue_start_row += 1
+            if overdue_end_row > end_row + 1:
+                overdue_end_row += 1
+
+    # 冻结首行
+    worksheet.freeze_panes = 'A2'
+
+    # 自动筛选
+    worksheet.auto_filter.ref = worksheet.dimensions
+
+
+# 主程序入口
+if __name__ == "__main__":
+    try:
+        # 如果Excel文件的列名有变化，只需在此处修改对应的常量
+        """
+        # 示例：如果列名发生变化，只需修改文件顶部的列名常量
+        # NAME_COL = "姓名"                     # 修改为新的姓名列名
+        # DATE_COL = "日期"                     # 修改为新的日期列名
+        # SALES_COL = "日销售额"                # 修改为新的销售额列名
+        # NORMAL_PAYMENT_COL = "普通回款"       # 修改为今日回款额列的新名称
+        # OVERDUE_PAYMENT_COL = "超期回款"      # 修改为超期账款回款额列的新名称
+        # OVERDUE_COL = "未追回超期账款"        # 修改为超期账款（未追回）列的新名称
+        # DEPARTMENT_COL = "部门"              # 修改为所在部门列的新名称
+        """
+
+        # 处理2025年7月数据
+        sales_data, score_data = process_sales_data(target_month=7, target_year=2025)
+    except Exception as e:
+        print(f"处理过程中发生错误: {e}")
+        import traceback
+
+        traceback.print_exc()
+        print("请检查Excel文件格式和数据")
