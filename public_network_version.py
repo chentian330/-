@@ -16,6 +16,10 @@ import re
 # 忽略警告
 warnings.filterwarnings('ignore')
 
+# 列名常量定义
+LAST_MONTH_SALES_COL = "上月销售额"  # 原来是"上月销售额(参考)"
+LAST_MONTH_PAYMENT_COL = "上月回款额"  # 原来是"上月回款额(参考)"
+
 
 # 智能金额格式化函数
 def format_amount(value, unit="万元"):
@@ -1390,6 +1394,11 @@ def display_achievement_badges(score_df, sales_df=None):
     if score_df is None or score_df.empty:
         return
 
+    # 如果没有销售数据则无法显示大部分徽章
+    if sales_df is None or sales_df.empty:
+        st.warning("没有可用的销售数据来显示成就徽章")
+        return
+
     st.markdown("""
     <style>
         .achievement-section {
@@ -1440,55 +1449,85 @@ def display_achievement_badges(score_df, sales_df=None):
     </style>
     """, unsafe_allow_html=True)
 
-    df = score_df.copy()
-    if sales_df is not None and not sales_df.empty:
-        sales_cols = ['员工姓名', '本月销售额', '本月回款合计', '本月回未超期款', '本月回超期款',
-                      '月末逾期未收回额']
-        week_cols = [col for col in sales_df.columns if '周周' in col or '周销售额' in col or '周回款合计' in col]
-        sales_cols.extend(week_cols)
-        ref_cols = [col for col in sales_df.columns if '上月' in col and '参考' in col]
-        sales_cols.extend(ref_cols)
+    # 直接使用销售回款数据统计表
+    df = sales_df.copy()
 
-        if '队名' in sales_df.columns:
-            sales_cols.append('队名')
-            existing_sales_cols = [col for col in sales_cols if col in sales_df.columns]
-            df = pd.merge(df.drop(columns=['队名'], errors='ignore'),
-                          sales_df[existing_sales_cols], on='员工姓名', how='left')
-        else:
-            existing_sales_cols = [col for col in sales_cols if col in sales_df.columns]
-            df = pd.merge(df, sales_df[existing_sales_cols], on='员工姓名', how='left')
+    # 排除合计行
+    df = df[df['员工姓名'] != '合计']
+    df = df[df['员工姓名'].notna()]
 
-    available_columns = df.columns.tolist()
+    # 定义成就字典
     achievements = {}
 
-    if '本月销售额' in available_columns:
-        max_sales_idx = df['本月销售额'].idxmax()
-        achievements['销售之星'] = {'icon': '💰', 'recipient': df.loc[max_sales_idx, '员工姓名']}
-    if '本月回款合计' in available_columns:
-        max_payment_idx = df['本月回款合计'].idxmax()
-        achievements['回款之王'] = {'icon': '💸', 'recipient': df.loc[max_payment_idx, '员工姓名']}
+    try:
+        # 销售之星：本月销售额最高的员工
+        if '本月销售额' in df.columns:
+            valid_sales = df[df['本月销售额'] > 0]
+            if not valid_sales.empty:
+                max_sales_row = valid_sales.loc[valid_sales['本月销售额'].astype(float).idxmax()]
+                if pd.notna(max_sales_row['员工姓名']):
+                    achievements['销售之星'] = {'icon': '💰', 'recipient': max_sales_row['员工姓名']}
 
-    if all(col in available_columns for col in ['本月销售额', '上月销售额(参考)', '本月回款合计', '上月回款额(参考)']):
-        df['进步值'] = (
-                (df['本月销售额'] - df['上月销售额(参考)'].fillna(0)) * 0.6 +
-                (df['本月回款合计'] - df['上月回款额(参考)'].fillna(0)) * 0.4
-        )
-        max_progress_idx = df['进步值'].idxmax()
-        achievements['进步最快'] = {'icon': '🚀', 'recipient': df.loc[max_progress_idx, '员工姓名']}
+        # 回款之王：本月回未超期款最高的员工
+        if '本月回未超期款' in df.columns:
+            valid_payments = df[df['本月回未超期款'] > 0]
+            if not valid_payments.empty:
+                max_payment_row = valid_payments.loc[valid_payments['本月回未超期款'].astype(float).idxmax()]
+                if pd.notna(max_payment_row['员工姓名']):
+                    achievements['回款之王'] = {'icon': '💸', 'recipient': max_payment_row['员工姓名']}
 
-    if '本月回超期款' in available_columns:
-        max_recovery_idx = df['本月回超期款'].idxmax()
-        achievements['追款能手'] = {'icon': '🕵️', 'recipient': df.loc[max_recovery_idx, '员工姓名']}
+        # 进步最快：计算进步值
+        if all(col in df.columns for col in
+               ['本月销售额', LAST_MONTH_SALES_COL, '本月回款合计', LAST_MONTH_PAYMENT_COL]):
+            # 确保所有列都为数值类型
+            for col in ['本月销售额', LAST_MONTH_SALES_COL, '本月回款合计', LAST_MONTH_PAYMENT_COL]:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+                df[col] = df[col].fillna(0)
 
-    if all(col in available_columns for col in ['队名', '个人总积分', '加权小组总分']):
-        df['个人贡献率'] = df['个人总积分'] / df['加权小组总分']
-        max_contrib_idx = df['个人贡献率'].idxmax()
-        achievements['团队核心'] = {'icon': '🤝', 'recipient': df.loc[max_contrib_idx, '员工姓名']}
+            # 计算进步值
+            df['进步值'] = (df['本月销售额'] - df[LAST_MONTH_SALES_COL]) * 0.6 + (
+                        df['本月回款合计'] - df[LAST_MONTH_PAYMENT_COL]) * 0.4
 
-    if '个人总积分' in available_columns:
-        max_score_idx = df['个人总积分'].idxmax()
-        achievements['全能冠军'] = {'icon': '🏆', 'recipient': df.loc[max_score_idx, '员工姓名']}
+            # 找出进步值最高的员工
+            if not df.empty:
+                max_progress_row = df.loc[df['进步值'].idxmax()]
+                if pd.notna(max_progress_row['员工姓名']):
+                    achievements['进步最快'] = {'icon': '🚀', 'recipient': max_progress_row['员工姓名']}
 
+        # 追款能手：本月回超期款最高的员工
+        if '本月回超期款' in df.columns:
+            valid_overdue = df[df['本月回超期款'] > 0]
+            if not valid_overdue.empty:
+                max_overdue_row = valid_overdue.loc[valid_overdue['本月回超期款'].astype(float).idxmax()]
+                if pd.notna(max_overdue_row['员工姓名']):
+                    achievements['追款能手'] = {'icon': '🕵️', 'recipient': max_overdue_row['员工姓名']}
+    except Exception as e:
+        print(f"计算销售回款成就时出错: {e}")
+
+    # 从积分数据中获取团队核心和全能冠军
+    try:
+        valid_score_df = score_df[score_df['员工姓名'].notna()]
+
+        # 团队核心：个人总积分/加权小组总分最高的员工
+        if all(col in valid_score_df.columns for col in ['个人总积分', '加权小组总分']):
+            valid_contrib = valid_score_df[(valid_score_df['个人总积分'] > 0) & (valid_score_df['加权小组总分'] > 0)]
+            if not valid_contrib.empty:
+                valid_contrib['个人贡献率'] = valid_contrib['个人总积分'] / valid_contrib['加权小组总分']
+                max_contrib_row = valid_contrib.loc[valid_contrib['个人贡献率'].idxmax()]
+                if pd.notna(max_contrib_row['员工姓名']):
+                    achievements['团队核心'] = {'icon': '🤝', 'recipient': max_contrib_row['员工姓名']}
+
+        # 全能冠军：个人总积分最高的员工
+        if '个人总积分' in valid_score_df.columns:
+            valid_score = valid_score_df[valid_score_df['个人总积分'] > 0]
+            if not valid_score.empty:
+                max_score_row = valid_score.loc[valid_score['个人总积分'].idxmax()]
+                if pd.notna(max_score_row['员工姓名']):
+                    achievements['全能冠军'] = {'icon': '🏆', 'recipient': max_score_row['员工姓名']}
+    except Exception as e:
+        print(f"计算积分成就时出错: {e}")
+
+    # 如果没有成就，显示警告
     if not achievements:
         st.warning("没有可用的数据来显示成就徽章")
         return
@@ -1508,65 +1547,6 @@ def display_achievement_badges(score_df, sales_df=None):
                 f'</div>',
                 unsafe_allow_html=True
             )
-
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    achievement_counts = {}
-    for badge_name, badge_info in achievements.items():
-        if badge_name == "团队核心" and isinstance(badge_info['recipient'], str):
-            try:
-                name_part = badge_info['recipient'].split('(')[0].strip()
-                employee_row = df[df['员工姓名'] == name_part]
-                if not employee_row.empty:
-                    team = employee_row.iloc[0]['队名']
-                    if pd.notna(team) and team != '':
-                        achievement_counts[team] = achievement_counts.get(team, 0) + 1
-            except Exception:
-                pass
-        else:
-            try:
-                if pd.notna(badge_info['recipient']):
-                    employee_row = df[df['员工姓名'] == badge_info['recipient']]
-                    if not employee_row.empty:
-                        team = employee_row.iloc[0]['队名']
-                        if pd.notna(team) and team != '':
-                            achievement_counts[team] = achievement_counts.get(team, 0) + 1
-            except Exception:
-                pass
-
-    if achievement_counts:
-        st.markdown("### 📊 本月成就统计")
-        achievement_df = pd.DataFrame({
-            '队名': list(achievement_counts.keys()),
-            '成就数量': list(achievement_counts.values())
-        })
-        fig = px.pie(
-            achievement_df,
-            values='成就数量',
-            names='队名',
-            hole=0.4,
-            color_discrete_sequence=['#FF453A', '#0A84FF', '#BF5AF2', '#FF9F0A', '#30D158']
-        )
-
-        fig.update_traces(
-            textposition='inside',
-            textinfo='percent+label',
-            hoverinfo='label+percent+value',
-            marker=dict(line=dict(color='#FFFFFF', width=2))
-        )
-
-        fig.update_layout(
-            showlegend=False,
-            height=350,
-            margin=dict(l=20, r=20, t=30, b=20),
-            title='各队成就分布',
-            font=dict(color='#1D1D1F'),
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)'
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("没有足够的成就数据来生成统计图表")
 
 
 # 显示员工详情
@@ -1709,8 +1689,8 @@ def display_employee_details(score_df, sales_df=None):
                         """, unsafe_allow_html=True)
 
                 ref_items = [
-                    ('上月销售额(参考)', emp_data.get('上月销售额(参考)', 0)),
-                    ('上月回款额(参考)', emp_data.get('上月回款额(参考)', 0))
+                    (LAST_MONTH_SALES_COL, emp_data.get(LAST_MONTH_SALES_COL, 0)),
+                    (LAST_MONTH_PAYMENT_COL, emp_data.get(LAST_MONTH_PAYMENT_COL, 0))
                 ]
                 has_ref_data = any(pd.notna(emp_data.get(item[0], None)) for item in ref_items)
 
@@ -1935,15 +1915,20 @@ def display_sales_overview(sales_df):
 
     st.markdown('<h3 class="section-title fade-in">📊 销售回款概览</h3>', unsafe_allow_html=True)
 
-    # 用新列名
-    total_sales = sales_df['本月销售额'].sum() / 10000
-    total_payment = sales_df['本月回款合计'].sum() / 10000
-    avg_sales = sales_df['本月销售额'].mean() / 10000
-    avg_payment = sales_df['本月回款合计'].mean() / 10000
+    # 排除合计行
+    filtered_df = sales_df[sales_df['员工姓名'] != '合计'].copy()
+    filtered_df = filtered_df[filtered_df['员工姓名'].notna()]
 
-    # 计算任务完成情况（如果有数据）
-    if '本月销售任务' in sales_df.columns and '销售业绩完成进度' in sales_df.columns:
-        avg_sales_progress = sales_df['销售业绩完成进度'].mean() * 100
+    # 直接使用Excel中的数据，不重新计算
+    # 将金额从元转换为万元用于显示
+    total_sales = filtered_df['本月销售额'].sum() / 10000
+    total_payment = filtered_df['本月回款合计'].sum() / 10000
+    avg_sales = filtered_df['本月销售额'].mean() / 10000
+    avg_payment = filtered_df['本月回款合计'].mean() / 10000
+
+    # 直接使用Excel中的完成进度数据
+    if '销售业绩完成进度' in filtered_df.columns:
+        avg_sales_progress = filtered_df['销售业绩完成进度'].mean() * 100
         progress_delta = f"{avg_sales_progress - 100:.1f}%" if avg_sales_progress >= 100 else f"{avg_sales_progress - 100:.1f}%"
         sales_delta_color = "normal" if avg_sales_progress >= 100 else "inverse"
     else:
@@ -1951,8 +1936,8 @@ def display_sales_overview(sales_df):
         progress_delta = None
         sales_delta_color = "off"
 
-    if '本月回款任务' in sales_df.columns and '回款业绩完成进度' in sales_df.columns:
-        avg_payment_progress = sales_df['回款业绩完成进度'].mean() * 100
+    if '回款业绩完成进度' in filtered_df.columns:
+        avg_payment_progress = filtered_df['回款业绩完成进度'].mean() * 100
         payment_progress_delta = f"{avg_payment_progress - 100:.1f}%" if avg_payment_progress >= 100 else f"{avg_payment_progress - 100:.1f}%"
         payment_delta_color = "normal" if avg_payment_progress >= 100 else "inverse"
     else:
@@ -1989,23 +1974,23 @@ def display_sales_overview(sales_df):
                           payment_progress_delta, delta_color=payment_delta_color,
                           help="回款额/回款任务的平均完成比例")
 
-    # 进度分布统计（如果有销售业绩进度数据）
-    if '销售业绩完成进度' in sales_df.columns or '回款业绩完成进度' in sales_df.columns:
+    # 进度分布统计（直接使用Excel中的进度数据）
+    if '销售业绩完成进度' in filtered_df.columns or '回款业绩完成进度' in filtered_df.columns:
         st.markdown("#### 业绩完成进度分布")
         progress_cols = st.columns(2)
 
         # 销售业绩完成进度分布
-        if '销售业绩完成进度' in sales_df.columns:
+        if '销售业绩完成进度' in filtered_df.columns:
             with progress_cols[0]:
                 # 分类
-                sales_df['销售完成率分类'] = pd.cut(
-                    sales_df['销售业绩完成进度'],
+                filtered_df['销售完成率分类'] = pd.cut(
+                    filtered_df['销售业绩完成进度'],
                     bins=[0, 0.66, 1.0, float('inf')],
                     labels=['低于66%', '66%-100%', '超过100%']
                 )
 
                 # 计算分类统计
-                sales_progress_counts = sales_df['销售完成率分类'].value_counts().reset_index()
+                sales_progress_counts = filtered_df['销售完成率分类'].value_counts().reset_index()
                 sales_progress_counts.columns = ['完成率区间', '人数']
 
                 # 饼图
@@ -2023,17 +2008,17 @@ def display_sales_overview(sales_df):
                 st.plotly_chart(fig, use_container_width=True)
 
         # 回款业绩完成进度分布
-        if '回款业绩完成进度' in sales_df.columns:
+        if '回款业绩完成进度' in filtered_df.columns:
             with progress_cols[1]:
                 # 分类
-                sales_df['回款完成率分类'] = pd.cut(
-                    sales_df['回款业绩完成进度'],
+                filtered_df['回款完成率分类'] = pd.cut(
+                    filtered_df['回款业绩完成进度'],
                     bins=[0, 0.66, 1.0, float('inf')],
                     labels=['低于66%', '66%-100%', '超过100%']
                 )
 
                 # 计算分类统计
-                payment_progress_counts = sales_df['回款完成率分类'].value_counts().reset_index()
+                payment_progress_counts = filtered_df['回款完成率分类'].value_counts().reset_index()
                 payment_progress_counts.columns = ['完成率区间', '人数']
 
                 # 饼图
@@ -2050,10 +2035,10 @@ def display_sales_overview(sales_df):
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
-    # 团队销售与回款对比
-    if '队名' in sales_df.columns:
+    # 团队销售与回款对比 - 使用Excel中的预计算数据
+    if '队名' in filtered_df.columns:
         st.markdown("#### 团队业绩对比")
-        team_sales = sales_df.groupby('队名').agg({
+        team_sales = filtered_df.groupby('队名').agg({
             '本月销售额': 'sum',
             '本月回款合计': 'sum',
             '员工姓名': 'count'
@@ -2062,64 +2047,29 @@ def display_sales_overview(sales_df):
         team_sales['本月销售额(万元)'] = team_sales['本月销售额'] / 10000
         team_sales['本月回款合计(万元)'] = team_sales['本月回款合计'] / 10000
 
-        # 如果有任务数据，计算团队整体完成率
-        if '本月销售任务' in sales_df.columns and '本月回款任务' in sales_df.columns:
-            team_tasks = sales_df.groupby('队名').agg({
-                '本月销售任务': 'sum',
-                '本月回款任务': 'sum'
-            }).reset_index()
-
-            team_sales = pd.merge(team_sales, team_tasks, on='队名', how='left')
-            team_sales['销售任务完成率'] = team_sales['本月销售额'] / team_sales['本月销售任务']
-            team_sales['回款任务完成率'] = team_sales['本月回款合计'] / team_sales['本月回款任务']
-
-            # 只显示销售与回款对比图表
-            fig = px.bar(team_sales, x='队名', y=['本月销售额(万元)', '本月回款合计(万元)'],
-                         title='各队销售与回款对比（单位：万元）',
-                         barmode='group',
-                         labels={'value': '金额（万元）'},
-                         color_discrete_sequence=['#0A84FF', '#BF5AF2'])
-            fig.update_layout(
-                height=450,
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)',
-                yaxis_title='金额（万元）',
-                font=dict(color='#1D1D1F'),
-                legend=dict(
-                    orientation="h",
-                    yanchor="bottom",
-                    y=1.02,
-                    xanchor="right",
-                    x=1
-                )
+        # 显示销售与回款对比图表
+        fig = px.bar(team_sales, x='队名', y=['本月销售额(万元)', '本月回款合计(万元)'],
+                     title='各队销售与回款对比（单位：万元）',
+                     barmode='group',
+                     labels={'value': '金额（万元）'},
+                     color_discrete_sequence=['#0A84FF', '#BF5AF2'])
+        fig.update_layout(
+            height=450,
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            yaxis_title='金额（万元）',
+            font=dict(color='#1D1D1F'),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1
             )
-            fig.update_xaxes(gridcolor='rgba(0,0,0,0.05)')
-            fig.update_yaxes(gridcolor='rgba(0,0,0,0.05)')
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            # 原来的图表
-            fig = px.bar(team_sales, x='队名', y=['本月销售额(万元)', '本月回款合计(万元)'],
-                         title='各队销售与回款对比（单位：万元）',
-                         barmode='group',
-                         labels={'value': '金额（万元）'},
-                         color_discrete_sequence=['#0A84FF', '#BF5AF2'])
-            fig.update_layout(
-                height=450,
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)',
-                yaxis_title='金额（万元）',
-                font=dict(color='#1D1D1F'),
-                legend=dict(
-                    orientation="h",
-                    yanchor="bottom",
-                    y=1.02,
-                    xanchor="right",
-                    x=1
-                )
-            )
-            fig.update_xaxes(gridcolor='rgba(0,0,0,0.05)')
-            fig.update_yaxes(gridcolor='rgba(0,0,0,0.05)')
-            st.plotly_chart(fig, use_container_width=True)
+        )
+        fig.update_xaxes(gridcolor='rgba(0,0,0,0.05)')
+        fig.update_yaxes(gridcolor='rgba(0,0,0,0.05)')
+        st.plotly_chart(fig, use_container_width=True)
     else:
         st.warning("销售数据中缺少'队名'列，无法按团队分组")
 
@@ -2131,18 +2081,25 @@ def display_weekly_analysis(sales_df):
 
     st.markdown('<h3 class="section-title fade-in">📅 周数据分析</h3>', unsafe_allow_html=True)
 
-    week_sales_cols = [f'第{i}周销售额' for i in range(1, 6) if f'第{i}周销售额' in sales_df.columns]
-    week_payment_cols = [f'第{i}周回款合计' for i in range(1, 6) if f'第{i}周回款合计' in sales_df.columns]
+    # 排除合计行
+    filtered_df = sales_df[sales_df['员工姓名'] != '合计'].copy()
+    filtered_df = filtered_df[filtered_df['员工姓名'].notna()]
+
+    # 直接从Excel中获取的周数据列名
+    week_sales_cols = [f'第{i}周销售额' for i in range(1, 6) if f'第{i}周销售额' in filtered_df.columns]
+    week_payment_cols = [f'第{i}周回款合计' for i in range(1, 6) if f'第{i}周回款合计' in filtered_df.columns]
 
     if week_sales_cols and week_payment_cols:
+        # 只转换单位为万元用于显示，不做其他计算
         weekly_totals = {}
         for i in range(1, 6):
             sales_col = f'第{i}周销售额'
             payment_col = f'第{i}周回款合计'
-            if sales_col in sales_df.columns and payment_col in sales_df.columns:
+            if sales_col in filtered_df.columns and payment_col in filtered_df.columns:
+                # 使用Excel中原始数据，只转换单位
                 weekly_totals[f'第{i}周'] = {
-                    '销售额(万元)': sales_df[sales_col].sum() / 10000,
-                    '回款额(万元)': sales_df[payment_col].sum() / 10000
+                    '销售额(万元)': filtered_df[sales_col].sum() / 10000,
+                    '回款额(万元)': filtered_df[payment_col].sum() / 10000
                 }
         if weekly_totals:
             weeks = list(weekly_totals.keys())
@@ -2569,8 +2526,8 @@ def display_sales_employee_details(score_df, sales_df=None):
                         """, unsafe_allow_html=True)
 
                 ref_items = [
-                    ('上月销售额(参考)', emp_data.get('上月销售额(参考)', 0)),
-                    ('上月回款额(参考)', emp_data.get('上月回款额(参考)', 0))
+                    (LAST_MONTH_SALES_COL, emp_data.get(LAST_MONTH_SALES_COL, 0)),
+                    (LAST_MONTH_PAYMENT_COL, emp_data.get(LAST_MONTH_PAYMENT_COL, 0))
                 ]
                 has_ref_data = any(pd.notna(emp_data.get(item[0], None)) for item in ref_items)
 
@@ -2787,16 +2744,20 @@ def display_sales_employee_details(score_df, sales_df=None):
                     st.plotly_chart(fig, use_container_width=True)
 
 
-# 新增函数：显示各周员工销售和回款数据
+# 显示各周员工销售和回款数据 - 直接使用Excel中的数据
 def display_weekly_employee_data(sales_df):
     if sales_df is None or sales_df.empty:
         return
 
     st.markdown('<h2 class="section-title fade-in">📊 各周员工数据分析</h2>', unsafe_allow_html=True)
 
-    # 获取周销售额和周回款额的列名
-    week_sales_cols = [f'第{i}周销售额' for i in range(1, 6) if f'第{i}周销售额' in sales_df.columns]
-    week_payment_cols = [f'第{i}周回款合计' for i in range(1, 6) if f'第{i}周回款合计' in sales_df.columns]
+    # 排除合计行
+    filtered_df = sales_df[sales_df['员工姓名'] != '合计'].copy()
+    filtered_df = filtered_df[filtered_df['员工姓名'].notna()]
+
+    # 从Excel数据中获取周销售额和周回款额的列名
+    week_sales_cols = [f'第{i}周销售额' for i in range(1, 6) if f'第{i}周销售额' in filtered_df.columns]
+    week_payment_cols = [f'第{i}周回款合计' for i in range(1, 6) if f'第{i}周回款合计' in filtered_df.columns]
 
     if not week_sales_cols or not week_payment_cols:
         st.info("当前数据中没有周数据信息")
@@ -2813,15 +2774,16 @@ def display_weekly_employee_data(sales_df):
         </div>
         """, unsafe_allow_html=True)
 
-        # 准备数据
+        # 准备数据 - 直接使用Excel数据，只转换单位
         weeks = [col.replace('销售额', '') for col in week_sales_cols]
         employee_sales_data = []
 
-        for _, row in sales_df.iterrows():
+        for _, row in filtered_df.iterrows():
             employee_name = row['员工姓名']
             for week_col in week_sales_cols:
                 week = week_col.replace('销售额', '')
-                sales_value = row[week_col] / 10000  # 转换为万元
+                # 只转换单位为万元，不做额外计算
+                sales_value = row[week_col] / 10000
                 if sales_value > 0:  # 只显示有销售额的数据
                     employee_sales_data.append({
                         '员工姓名': employee_name,
@@ -2875,14 +2837,15 @@ def display_weekly_employee_data(sales_df):
         </div>
         """, unsafe_allow_html=True)
 
-        # 准备数据
+        # 准备数据 - 直接使用Excel数据，只转换单位
         employee_payment_data = []
 
-        for _, row in sales_df.iterrows():
+        for _, row in filtered_df.iterrows():
             employee_name = row['员工姓名']
             for week_col in week_payment_cols:
                 week = week_col.replace('回款合计', '')
-                payment_value = row[week_col] / 10000  # 转换为万元
+                # 只转换单位为万元，不做额外计算
+                payment_value = row[week_col] / 10000
                 if payment_value > 0:  # 只显示有回款额的数据
                     employee_payment_data.append({
                         '员工姓名': employee_name,
